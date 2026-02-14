@@ -156,14 +156,26 @@ namespace dxvk {
     if (mapping.FormatColor == VK_FORMAT_UNDEFINED)
       return D3DERR_NOTAVAILABLE;
 
-    if (mapping.FormatSrgb  == VK_FORMAT_UNDEFINED && srgb)
-      return D3DERR_NOTAVAILABLE;
+    VkFormat checkFormat = mapping.ConversionFormatInfo.FormatColor != VK_FORMAT_UNDEFINED
+      ? mapping.ConversionFormatInfo.FormatColor
+      : mapping.FormatColor;
+
+    if (srgb) {
+      VkFormat srgbFormat = mapping.ConversionFormatInfo.FormatSrgb != VK_FORMAT_UNDEFINED
+        ? mapping.ConversionFormatInfo.FormatSrgb
+        : mapping.FormatSrgb;
+
+      if (srgbFormat == VK_FORMAT_UNDEFINED)
+        return D3DERR_NOTAVAILABLE;
+
+      checkFormat = srgbFormat;
+    }
 
     if (RType == D3DRTYPE_VERTEXBUFFER || RType == D3DRTYPE_INDEXBUFFER)
       return D3D_OK;
 
     // Let's actually ask Vulkan now that we got some quirks out the way!
-    return CheckDeviceVkFormat(mapping.FormatColor, Usage, RType);
+    return CheckDeviceVkFormat(checkFormat, Usage, RType);
   }
 
 

@@ -263,16 +263,24 @@ namespace dxvk {
     // The image must be marked as mutable if it can be reinterpreted
     // by a view with a different format. Depth-stencil formats cannot
     // be reinterpreted in Vulkan, so we'll ignore those.
-    auto formatProperties = imageFormatInfo(m_mapping.FormatColor);
+    VkFormat imageViewColorFormat = m_mapping.ConversionFormatInfo.FormatColor != VK_FORMAT_UNDEFINED
+      ? m_mapping.ConversionFormatInfo.FormatColor
+      : m_mapping.FormatColor;
+    VkFormat imageViewSrgbFormat = m_mapping.ConversionFormatInfo.FormatSrgb != VK_FORMAT_UNDEFINED
+      ? m_mapping.ConversionFormatInfo.FormatSrgb
+      : m_mapping.FormatSrgb;
 
-    bool isMutable     = m_mapping.FormatSrgb != VK_FORMAT_UNDEFINED;
+    auto formatProperties = imageFormatInfo(imageViewColorFormat);
+
+    bool isMutable     = imageViewSrgbFormat != VK_FORMAT_UNDEFINED;
     bool isColorFormat = (formatProperties->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
+    VkFormat viewFormats[2] = { imageViewColorFormat, imageViewSrgbFormat };
 
     if (isMutable && isColorFormat) {
       imageInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
 
       imageInfo.viewFormatCount = 2;
-      imageInfo.viewFormats     = m_mapping.Formats;
+      imageInfo.viewFormats     = viewFormats;
     }
 
     // Are we an RT, need to gen mips or an offscreen plain surface?

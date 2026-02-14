@@ -16,6 +16,7 @@ layout(binding = 1) uniform usamplerBuffer src;
 layout(push_constant)
 uniform u_info_t {
   uvec2 extent;
+  ivec2 dstOffset;
 } u_info;
 
 void main() {
@@ -39,6 +40,6 @@ void main() {
       snormalize(w10, 10),
       unormalize(a2,  2));
     
-    imageStore(dst, thread_id.xy, color);
+    imageStore(dst, thread_id.xy + u_info.dstOffset, color);
   }
 }

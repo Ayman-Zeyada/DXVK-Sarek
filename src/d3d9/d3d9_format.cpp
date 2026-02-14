@@ -455,6 +455,10 @@ namespace dxvk {
   D3D9VkFormatTable::D3D9VkFormatTable(
     const Rc<DxvkAdapter>& adapter,
     const D3D9Options&     options) {
+    m_emulateBc = adapter != nullptr
+               && adapter->features().core.features.textureCompressionBC == VK_FALSE;
+    applyTristate(m_emulateBc, options.emulateBc);
+
     m_dfSupport = options.supportDFFormats;
     m_x4r4g4b4Support = options.supportX4R4G4B4;
     m_d32supportFinal = options.supportD32;
@@ -487,6 +491,9 @@ namespace dxvk {
 
     if (!m_a4r4g4b4Support)
       Logger::warn("D3D9: VK_FORMAT_A4R4G4B4_UNORM_PACK16_EXT -> VK_FORMAT_B4G4R4A4_UNORM_PACK16");
+
+    if (m_emulateBc)
+      Logger::info("D3D9: Emulating BC1/2/3 formats with RGBA8 conversion");
   }
 
   D3D9_VK_FORMAT_MAPPING D3D9VkFormatTable::GetFormatMapping(
@@ -520,6 +527,33 @@ namespace dxvk {
       mapping.Swizzle     = {
         VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R,
         VK_COMPONENT_SWIZZLE_A, alphaSwizzle };
+    }
+
+    if (m_emulateBc) {
+      switch (Format) {
+        case D3D9Format::DXT1:
+          mapping.ConversionFormatInfo = {
+            D3D9ConversionFormat_BC1, 1u,
+            VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_SRGB };
+          break;
+
+        case D3D9Format::DXT2:
+        case D3D9Format::DXT3:
+          mapping.ConversionFormatInfo = {
+            D3D9ConversionFormat_BC2, 1u,
+            VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_SRGB };
+          break;
+
+        case D3D9Format::DXT4:
+        case D3D9Format::DXT5:
+          mapping.ConversionFormatInfo = {
+            D3D9ConversionFormat_BC3, 1u,
+            VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_SRGB };
+          break;
+
+        default:
+          break;
+      }
     }
 
     return mapping;

@@ -16,6 +16,7 @@ layout(binding = 1) uniform usamplerBuffer src;
 layout(push_constant)
 uniform u_info_t {
   uvec2 extent;
+  ivec2 dstOffset;
 } u_info;
 
 vec2 fetchUnorm2x8(usamplerBuffer source, uint offset) {
@@ -55,7 +56,7 @@ void main() {
 
     // We write as a macropixel of [2, 1]
     // So write out 2 pixels in this run.
-    ivec2 writePos = thread_id.xy * ivec2(2, 1);
+    ivec2 writePos = thread_id.xy * ivec2(2, 1) + u_info.dstOffset;
     
     imageStore(dst, ivec2(writePos.x,     writePos.y), color0);
     imageStore(dst, ivec2(writePos.x + 1, writePos.y), color1);

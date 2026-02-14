@@ -143,8 +143,17 @@ namespace dxvk {
     D3D9ConversionFormat_W11V11U10,
     D3D9ConversionFormat_NV12,
     D3D9ConversionFormat_YV12,
+    D3D9ConversionFormat_BC1,
+    D3D9ConversionFormat_BC2,
+    D3D9ConversionFormat_BC3,
     D3D9ConversionFormat_Count
   };
+
+  inline bool IsBcConversionFormat(D3D9ConversionFormat format) {
+    return format == D3D9ConversionFormat_BC1
+        || format == D3D9ConversionFormat_BC2
+        || format == D3D9ConversionFormat_BC3;
+  }
 
   struct D3D9_CONVERSION_FORMAT_INFO {
     D3D9ConversionFormat FormatType     = D3D9ConversionFormat_None;
@@ -221,6 +230,7 @@ namespace dxvk {
     bool m_a4r4g4b4Support;
     bool m_d24s8Support;
     bool m_d16s8Support;
+    bool m_emulateBc;
 
     bool m_dfSupport;
     bool m_x4r4g4b4Support;

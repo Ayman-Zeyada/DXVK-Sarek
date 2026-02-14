@@ -19,7 +19,9 @@ namespace dxvk {
             D3D9_CONVERSION_FORMAT_INFO   conversionFormat,
       const Rc<DxvkImage>&                dstImage,
             VkImageSubresourceLayers      dstSubresource,
-      const DxvkBufferSlice&              srcSlice);
+      const DxvkBufferSlice&              srcSlice,
+            VkOffset3D                    dstOffset,
+            VkExtent3D                    dstExtent);
 
   private:
 
@@ -30,11 +32,18 @@ namespace dxvk {
       const DxvkBufferSlice&              srcSlice,
             VkFormat                      bufferFormat,
             uint32_t                      specConstantValue,
-            VkExtent2D                    macroPixelRun);
+            VkExtent2D                    macroPixelRun,
+            VkOffset3D                    dstOffset,
+            VkExtent3D                    dstExtent);
 
     enum BindingIds : uint32_t {
       Image  = 0,
       Buffer = 1,
+    };
+
+    struct D3D9ConvertPushConstants {
+      VkExtent2D extent;
+      VkOffset2D dstOffset;
     };
 
     void InitShaders();

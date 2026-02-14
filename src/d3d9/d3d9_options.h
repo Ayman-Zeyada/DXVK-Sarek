@@ -98,6 +98,11 @@ namespace dxvk {
     /// Support D32
     bool supportD32;
 
+    /// Emulate BC1/2/3 formats using RGBA8 conversion targets.
+    /// In auto mode, this is enabled when the adapter lacks
+    /// native BC texture compression support.
+    Tristate emulateBc;
+
     /// Disable D3DFMT_A8 for render targets.
     /// Specifically to work around a game
     /// bug in The Sims 2 that happens on native too!

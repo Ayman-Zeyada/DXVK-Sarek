@@ -1,0 +1,81 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+#include "d3d9_convert_common.h"
+
+layout(
+  local_size_x = 8,
+  local_size_y = 8,
+  local_size_z = 1) in;
+
+layout(binding = 0)
+writeonly uniform image2D dst;
+
+layout(binding = 1) uniform usamplerBuffer src;
+
+layout(push_constant)
+uniform u_info_t {
+  uvec2 extent;
+  ivec2 dstOffset;
+} u_info;
+
+vec3 decodeRgb565(uint value) {
+  uint r = (value >> 11) & 0x1Fu;
+  uint g = (value >> 5)  & 0x3Fu;
+  uint b = value & 0x1Fu;
+
+  return vec3(
+    unormalize(r, 5),
+    unormalize(g, 6),
+    unormalize(b, 5));
+}
+
+vec3 decodeBcColorOpaque(uint color0, uint color1, uint selector) {
+  vec3 colors[4];
+  colors[0] = decodeRgb565(color0);
+  colors[1] = decodeRgb565(color1);
+  colors[2] = (2.0 * colors[0] + colors[1]) / 3.0;
+  colors[3] = (colors[0] + 2.0 * colors[1]) / 3.0;
+
+  return colors[selector];
+}
+
+void main() {
+  ivec2 blockCoord = ivec2(gl_GlobalInvocationID.xy);
+
+  if (all(lessThan(blockCoord, ivec2(u_info.extent)))) {
+    uint blockOffset = uint(blockCoord.x) + uint(blockCoord.y) * u_info.extent.x;
+    uint baseOffset = blockOffset * 4u;
+
+    uint alphaBlockLo = texelFetch(src, int(baseOffset + 0u)).r;
+    uint alphaBlockHi = texelFetch(src, int(baseOffset + 1u)).r;
+    uint colorBlockLo = texelFetch(src, int(baseOffset + 2u)).r;
+    uint colorBlockHi = texelFetch(src, int(baseOffset + 3u)).r;
+
+    uint color0 = colorBlockLo & 0xFFFFu;
+    uint color1 = colorBlockLo >> 16;
+    uint selectors = colorBlockHi;
+
+    ivec2 pixelBase = blockCoord * ivec2(4, 4) + u_info.dstOffset;
+    ivec2 dstExtent = imageSize(dst);
+
+    for (int y = 0; y < 4; y++) {
+      for (int x = 0; x < 4; x++) {
+        uint pixelIndex = uint(x + y * 4);
+        uint selector = (selectors >> (pixelIndex * 2u)) & 0x3u;
+
+        uint alphaWord = pixelIndex < 8u ? alphaBlockLo : alphaBlockHi;
+        uint alphaShift = (pixelIndex & 0x7u) * 4u;
+        uint alpha4 = (alphaWord >> alphaShift) & 0xFu;
+
+        vec3 rgb = decodeBcColorOpaque(color0, color1, selector);
+        float alpha = unormalize(alpha4, 4);
+
+        ivec2 pixelPos = pixelBase + ivec2(x, y);
+        if (all(greaterThanEqual(pixelPos, ivec2(0)))
+         && all(lessThan(pixelPos, dstExtent)))
+          imageStore(dst, pixelPos, vec4(rgb, alpha));
+      }
+    }
+  }
+}

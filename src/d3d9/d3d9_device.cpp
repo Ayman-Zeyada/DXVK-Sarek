@@ -4424,6 +4424,13 @@ namespace dxvk {
     bool needsReadback = pResource->NeedsReachback(Subresource) || renderable;
     pResource->SetNeedsReadback(Subresource, false);
 
+    if (unlikely(IsBcConversionFormat(formatMapping.ConversionFormatInfo.FormatType) && needsReadback)) {
+      Logger::warn(str::format(
+        "D3D9: BC readback is not supported for emulated format ",
+        desc.Format, " (subresource ", Subresource, ")."));
+      return D3DERR_INVALIDCALL;
+    }
+
     DxvkBufferSliceHandle physSlice;
 
     if (Flags & D3DLOCK_DISCARD) {
@@ -4674,57 +4681,60 @@ namespace dxvk {
     // we need to copy its contents into the image
     const DxvkBufferSliceHandle srcSlice = pSrcTexture->GetMappedSlice(SrcSubresource);
 
-    auto formatInfo  = imageFormatInfo(image->info().format);
+    auto convertFormat = pDestTexture->GetFormatMapping().ConversionFormatInfo;
+    const DxvkFormatInfo* dstFormatInfo = imageFormatInfo(image->info().format);
+    const DxvkFormatInfo* srcFormatInfo = convertFormat.FormatType != D3D9ConversionFormat_None
+      ? imageFormatInfo(pDestTexture->GetFormatMapping().FormatColor)
+      : dstFormatInfo;
+
     auto srcSubresource = pSrcTexture->GetSubresourceFromIndex(
-      formatInfo->aspectMask, SrcSubresource);
+      srcFormatInfo->aspectMask, SrcSubresource);
 
     auto dstSubresource = pDestTexture->GetSubresourceFromIndex(
-      formatInfo->aspectMask, DestSubresource);
+      dstFormatInfo->aspectMask, DestSubresource);
     VkImageSubresourceLayers dstLayers = { dstSubresource.aspectMask, dstSubresource.mipLevel, dstSubresource.arrayLayer, 1 };
 
     VkExtent3D dstTexLevelExtent = image->mipLevelExtent(dstSubresource.mipLevel);
     VkExtent3D srcTexLevelExtent = util::computeMipLevelExtent(pSrcTexture->GetExtent(), srcSubresource.mipLevel);
-    VkExtent3D srcTexLevelExtentBlockCount = util::computeBlockCount(srcTexLevelExtent, formatInfo->blockSize);
-
-    auto convertFormat = pDestTexture->GetFormatMapping().ConversionFormatInfo;
+    VkExtent3D srcTexLevelExtentBlockCount = util::computeBlockCount(srcTexLevelExtent, srcFormatInfo->blockSize);
 
     if (likely(convertFormat.FormatType == D3D9ConversionFormat_None)) {
       VkOffset3D alignedDestOffset = {
-        int32_t(alignDown(DestOffset.x, formatInfo->blockSize.width)),
-        int32_t(alignDown(DestOffset.y, formatInfo->blockSize.height)),
-        int32_t(alignDown(DestOffset.z, formatInfo->blockSize.depth))
+        int32_t(alignDown(DestOffset.x, srcFormatInfo->blockSize.width)),
+        int32_t(alignDown(DestOffset.y, srcFormatInfo->blockSize.height)),
+        int32_t(alignDown(DestOffset.z, srcFormatInfo->blockSize.depth))
       };
       VkOffset3D alignedSrcOffset = {
-        int32_t(alignDown(SrcOffset.x, formatInfo->blockSize.width)),
-        int32_t(alignDown(SrcOffset.y, formatInfo->blockSize.height)),
-        int32_t(alignDown(SrcOffset.z, formatInfo->blockSize.depth))
+        int32_t(alignDown(SrcOffset.x, srcFormatInfo->blockSize.width)),
+        int32_t(alignDown(SrcOffset.y, srcFormatInfo->blockSize.height)),
+        int32_t(alignDown(SrcOffset.z, srcFormatInfo->blockSize.depth))
       };
       SrcExtent.width += SrcOffset.x - alignedSrcOffset.x;
       SrcExtent.height += SrcOffset.y - alignedSrcOffset.y;
       SrcExtent.depth += SrcOffset.z - alignedSrcOffset.z;
-      VkExtent3D extentBlockCount = util::computeBlockCount(SrcExtent, formatInfo->blockSize);
-      VkExtent3D alignedExtent = util::computeBlockExtent(extentBlockCount, formatInfo->blockSize);
+      VkExtent3D extentBlockCount = util::computeBlockCount(SrcExtent, srcFormatInfo->blockSize);
+      VkExtent3D alignedExtent = util::computeBlockExtent(extentBlockCount, srcFormatInfo->blockSize);
 
       alignedExtent = util::snapExtent3D(alignedDestOffset, alignedExtent, dstTexLevelExtent);
       alignedExtent = util::snapExtent3D(alignedSrcOffset, alignedExtent, srcTexLevelExtent);
 
-      VkOffset3D srcOffsetBlockCount = util::computeBlockOffset(alignedSrcOffset, formatInfo->blockSize);
-      VkExtent3D srcTexLevelExtentBlockCount = util::computeBlockCount(srcTexLevelExtent, formatInfo->blockSize);
-      VkDeviceSize pitch = align(srcTexLevelExtentBlockCount.width * formatInfo->elementSize, 4);
+      VkOffset3D srcOffsetBlockCount = util::computeBlockOffset(alignedSrcOffset, srcFormatInfo->blockSize);
+      VkExtent3D srcTexLevelExtentBlockCount = util::computeBlockCount(srcTexLevelExtent, srcFormatInfo->blockSize);
+      VkDeviceSize pitch = align(srcTexLevelExtentBlockCount.width * srcFormatInfo->elementSize, 4);
       VkDeviceSize copySrcOffset = srcOffsetBlockCount.z * srcTexLevelExtentBlockCount.height * pitch
           + srcOffsetBlockCount.y * pitch
-          + srcOffsetBlockCount.x * formatInfo->elementSize;
+          + srcOffsetBlockCount.x * srcFormatInfo->elementSize;
 
       VkDeviceSize sliceAlignment = 1;
       VkDeviceSize rowAlignment = 1;
       DxvkBufferSlice copySrcSlice;
       if (pSrcTexture->DoesStagingBufferUploads(SrcSubresource)) {
-        VkDeviceSize dirtySize = extentBlockCount.width * extentBlockCount.height * extentBlockCount.depth * formatInfo->elementSize;
+        VkDeviceSize dirtySize = extentBlockCount.width * extentBlockCount.height * extentBlockCount.depth * srcFormatInfo->elementSize;
         D3D9BufferSlice slice = AllocTempBuffer<false>(dirtySize);
         copySrcSlice = slice.slice;
         void* srcData = reinterpret_cast<uint8_t*>(srcSlice.mapPtr) + copySrcOffset;
         util::packImageData(
-          slice.mapPtr, srcData, extentBlockCount, formatInfo->elementSize,
+          slice.mapPtr, srcData, extentBlockCount, srcFormatInfo->elementSize,
           pitch, pitch * srcTexLevelExtentBlockCount.height);
       } else {
         copySrcSlice = DxvkBufferSlice(pSrcTexture->GetBuffer(SrcSubresource), copySrcOffset, srcSlice.length);
@@ -4767,38 +4777,89 @@ namespace dxvk {
       TrackTextureMappingBufferSequenceNumber(pSrcTexture, SrcSubresource);
     }
     else {
-      const DxvkFormatInfo* formatInfo = imageFormatInfo(pDestTexture->GetFormatMapping().FormatColor);
-
-      // Add more blocks for the other planes that we might have.
-      // TODO: PLEASE CLEAN ME
-      srcTexLevelExtentBlockCount.height *= std::min(convertFormat.PlaneCount, 2u);
-
-      if (unlikely(SrcOffset.x != 0 || SrcOffset.y != 0 || SrcOffset.z != 0
-        || DestOffset.x != 0 || DestOffset.y != 0 || DestOffset.z != 0
-        || SrcExtent != srcTexLevelExtent)) {
-        Logger::warn("Offset and rect not supported with the texture converter.");
-      }
-
       if (unlikely(srcTexLevelExtent != dstTexLevelExtent)) {
         Logger::err("Different extents are not supported with the texture converter.");
         return;
       }
 
-      // the converter can not handle the 4 aligned pitch so we always repack into a staging buffer
-      D3D9BufferSlice slice = AllocTempBuffer<false>(srcSlice.length);
-      VkDeviceSize pitch = align(srcTexLevelExtentBlockCount.width * formatInfo->elementSize, 4);
+      const bool bcConversion = IsBcConversionFormat(convertFormat.FormatType);
 
-      util::packImageData(
-        slice.mapPtr, srcSlice.mapPtr, srcTexLevelExtentBlockCount, formatInfo->elementSize,
-        pitch, std::min(convertFormat.PlaneCount, 2u) * pitch * srcTexLevelExtentBlockCount.height);
+      if (!bcConversion) {
+        // Add more blocks for the other planes that we might have.
+        // TODO: PLEASE CLEAN ME
+        srcTexLevelExtentBlockCount.height *= std::min(convertFormat.PlaneCount, 2u);
 
-      Flush();
-      SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+        if (unlikely(SrcOffset.x != 0 || SrcOffset.y != 0 || SrcOffset.z != 0
+          || DestOffset.x != 0 || DestOffset.y != 0 || DestOffset.z != 0
+          || SrcExtent != srcTexLevelExtent)) {
+          Logger::warn("Offset and rect not supported with the texture converter.");
+        }
 
-      m_converter->ConvertFormat(
-        convertFormat,
-        image, dstLayers,
-        slice.slice);
+        // The converter can not handle the 4-byte aligned pitch,
+        // so we always repack into a staging buffer.
+        D3D9BufferSlice slice = AllocTempBuffer<false>(srcSlice.length);
+        VkDeviceSize pitch = align(srcTexLevelExtentBlockCount.width * srcFormatInfo->elementSize, 4);
+
+        util::packImageData(
+          slice.mapPtr, srcSlice.mapPtr, srcTexLevelExtentBlockCount, srcFormatInfo->elementSize,
+          pitch, std::min(convertFormat.PlaneCount, 2u) * pitch * srcTexLevelExtentBlockCount.height);
+
+        Flush();
+        SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+
+        m_converter->ConvertFormat(
+          convertFormat,
+          image, dstLayers,
+          slice.slice,
+          VkOffset3D { 0, 0, 0 },
+          srcTexLevelExtent);
+      } else {
+        VkOffset3D alignedDestOffset = {
+          int32_t(alignDown(DestOffset.x, srcFormatInfo->blockSize.width)),
+          int32_t(alignDown(DestOffset.y, srcFormatInfo->blockSize.height)),
+          int32_t(alignDown(DestOffset.z, srcFormatInfo->blockSize.depth))
+        };
+        VkOffset3D alignedSrcOffset = {
+          int32_t(alignDown(SrcOffset.x, srcFormatInfo->blockSize.width)),
+          int32_t(alignDown(SrcOffset.y, srcFormatInfo->blockSize.height)),
+          int32_t(alignDown(SrcOffset.z, srcFormatInfo->blockSize.depth))
+        };
+        SrcExtent.width += SrcOffset.x - alignedSrcOffset.x;
+        SrcExtent.height += SrcOffset.y - alignedSrcOffset.y;
+        SrcExtent.depth += SrcOffset.z - alignedSrcOffset.z;
+
+        VkExtent3D extentBlockCount = util::computeBlockCount(SrcExtent, srcFormatInfo->blockSize);
+        VkExtent3D alignedExtent = util::computeBlockExtent(extentBlockCount, srcFormatInfo->blockSize);
+
+        alignedExtent = util::snapExtent3D(alignedDestOffset, alignedExtent, dstTexLevelExtent);
+        alignedExtent = util::snapExtent3D(alignedSrcOffset, alignedExtent, srcTexLevelExtent);
+        extentBlockCount = util::computeBlockCount(alignedExtent, srcFormatInfo->blockSize);
+
+        VkOffset3D srcOffsetBlockCount = util::computeBlockOffset(alignedSrcOffset, srcFormatInfo->blockSize);
+        VkExtent3D srcTexLevelExtentBlockCount = util::computeBlockCount(srcTexLevelExtent, srcFormatInfo->blockSize);
+        VkDeviceSize pitch = align(srcTexLevelExtentBlockCount.width * srcFormatInfo->elementSize, 4);
+        VkDeviceSize copySrcOffset = srcOffsetBlockCount.z * srcTexLevelExtentBlockCount.height * pitch
+          + srcOffsetBlockCount.y * pitch
+          + srcOffsetBlockCount.x * srcFormatInfo->elementSize;
+
+        VkDeviceSize dirtySize = extentBlockCount.width * extentBlockCount.height * extentBlockCount.depth * srcFormatInfo->elementSize;
+        D3D9BufferSlice slice = AllocTempBuffer<false>(dirtySize);
+
+        void* srcData = reinterpret_cast<uint8_t*>(srcSlice.mapPtr) + copySrcOffset;
+        util::packImageData(
+          slice.mapPtr, srcData, extentBlockCount, srcFormatInfo->elementSize,
+          pitch, pitch * srcTexLevelExtentBlockCount.height);
+
+        Flush();
+        SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+
+        m_converter->ConvertFormat(
+          convertFormat,
+          image, dstLayers,
+          slice.slice,
+          alignedDestOffset,
+          alignedExtent);
+      }
     }
   }
 
