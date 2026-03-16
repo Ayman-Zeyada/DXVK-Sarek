@@ -29,6 +29,9 @@ namespace dxvk {
 
     /// Whether or not we need to use custom sincos
     bool sincosEmulation = false;
+
+    /// Whether vertex shaders may emit ClipDistance builtins.
+    bool enableClipDistance = false;
   };
 
 }

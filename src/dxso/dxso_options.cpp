@@ -21,6 +21,7 @@ namespace dxvk {
     vertexFloatConstantBufferAsSSBO = pDevice->GetVertexConstantLayout().floatSize() > devInfo.core.properties.limits.maxUniformBufferRange;
 
     sincosEmulation     = device->getShaderCompileOptions().flags.test(DxvkShaderCompileFlag::LowerSinCos);
+    enableClipDistance  = device->features().core.features.shaderClipDistance;
   }
 
 }
