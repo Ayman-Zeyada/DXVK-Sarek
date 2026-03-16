@@ -827,7 +827,7 @@ namespace dxvk {
       ENABLE_FEATURE(core.features, depthClamp, true),
       ENABLE_FEATURE(core.features, drawIndirectFirstInstance, false),
       ENABLE_FEATURE(core.features, dualSrcBlend, true),
-      ENABLE_FEATURE(core.features, fillModeNonSolid, true),
+      ENABLE_FEATURE(core.features, fillModeNonSolid, false),
       ENABLE_FEATURE(core.features, fragmentStoresAndAtomics, true),
       ENABLE_FEATURE(core.features, fullDrawIndexUint32, true),
       ENABLE_FEATURE(core.features, geometryShader, true),
@@ -836,7 +836,7 @@ namespace dxvk {
       ENABLE_FEATURE(core.features, largePoints, false),
       ENABLE_FEATURE(core.features, logicOp, false),
       ENABLE_FEATURE(core.features, multiDrawIndirect, true),
-      ENABLE_FEATURE(core.features, multiViewport, true),
+      ENABLE_FEATURE(core.features, multiViewport, false),
       ENABLE_FEATURE(core.features, occlusionQueryPrecise, true),
       ENABLE_FEATURE(core.features, pipelineStatisticsQuery, false),
       ENABLE_FEATURE(core.features, robustBufferAccess, true),
@@ -984,7 +984,7 @@ namespace dxvk {
       ENABLE_EXT_FEATURE(extPageableDeviceLocalMemory, pageableDeviceLocalMemory, false),
 
       /* Robustness, all features effectively required for correctness */
-      ENABLE_EXT_FEATURE(extRobustness2, robustBufferAccess2, true),
+      ENABLE_EXT_FEATURE(extRobustness2, robustBufferAccess2, false),
       ENABLE_EXT_FEATURE(extRobustness2, robustImageAccess2, false),
       ENABLE_EXT_FEATURE(extRobustness2, nullDescriptor, true),
 
