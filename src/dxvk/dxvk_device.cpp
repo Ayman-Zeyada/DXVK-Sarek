@@ -766,6 +766,10 @@ namespace dxvk {
   void DxvkDevice::determineShaderOptions() {
     m_shaderOptions.minStorageBufferAlignment =
       m_properties.core.properties.limits.minStorageBufferOffsetAlignment;
+    m_shaderOptions.enableClipDistance =
+      m_features.core.features.shaderClipDistance;
+    m_shaderOptions.enableCullDistance =
+      m_features.core.features.shaderCullDistance;
 
     if (m_features.core.features.shaderInt16 && m_features.vk12.shaderFloat16)
       m_shaderOptions.flags.set(DxvkShaderCompileFlag::Supports16BitArithmetic);

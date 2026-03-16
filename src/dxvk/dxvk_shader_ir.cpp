@@ -607,6 +607,9 @@ namespace dxvk {
 
       auto builtIn = dxbc_spv::ir::BuiltIn(op->getOperand(op->getFirstLiteralOperandIndex()));
 
+      if (!supportsBuiltIn(builtIn))
+        return rewriteBuiltInAsZero(op);
+
       if (builtIn == dxbc_spv::ir::BuiltIn::eSampleCount
        || builtIn == dxbc_spv::ir::BuiltIn::eTessFactorLimit)
         return rewriteBuiltIn(op, builtIn);
@@ -620,6 +623,9 @@ namespace dxvk {
 
     dxbc_spv::ir::Builder::iterator handleBuiltInOutput(dxbc_spv::ir::Builder::iterator op) {
       auto builtIn = dxbc_spv::ir::BuiltIn(op->getOperand(op->getFirstLiteralOperandIndex()));
+
+      if (!supportsBuiltIn(builtIn))
+        return dropBuiltInOutput(op);
 
       switch (builtIn) {
         case dxbc_spv::ir::BuiltIn::ePosition: {
@@ -917,6 +923,52 @@ namespace dxvk {
       }
 
       return m_builder.iter(m_builder.remove(op->getDef()));
+    }
+
+
+    dxbc_spv::ir::Builder::iterator rewriteBuiltInAsZero(dxbc_spv::ir::Builder::iterator op) {
+      small_vector<dxbc_spv::ir::SsaDef, 64u> uses;
+      m_builder.getUses(op->getDef(), uses);
+
+      for (auto use : uses) {
+        const auto& useOp = m_builder.getOp(use);
+
+        if (useOp.getOpCode() == dxbc_spv::ir::OpCode::eInputLoad)
+          m_builder.rewriteDef(use, m_builder.makeConstantZero(useOp.getType()));
+        else
+          m_builder.remove(use);
+      }
+
+      return m_builder.iter(m_builder.remove(op->getDef()));
+    }
+
+
+    dxbc_spv::ir::Builder::iterator dropBuiltInOutput(dxbc_spv::ir::Builder::iterator op) {
+      small_vector<dxbc_spv::ir::SsaDef, 64u> uses;
+      m_builder.getUses(op->getDef(), uses);
+
+      for (auto use : uses) {
+        const auto& useOp = m_builder.getOp(use);
+
+        if (useOp.getOpCode() == dxbc_spv::ir::OpCode::eOutputLoad)
+          m_builder.rewriteDef(use, m_builder.makeConstantZero(useOp.getType()));
+        else
+          m_builder.remove(use);
+      }
+
+      return m_builder.iter(m_builder.remove(op->getDef()));
+    }
+
+
+    bool supportsBuiltIn(dxbc_spv::ir::BuiltIn builtIn) const {
+      switch (builtIn) {
+        case dxbc_spv::ir::BuiltIn::eClipDistance:
+          return m_info.options.enableClipDistance;
+        case dxbc_spv::ir::BuiltIn::eCullDistance:
+          return m_info.options.enableCullDistance;
+        default:
+          return true;
+      }
     }
 
 

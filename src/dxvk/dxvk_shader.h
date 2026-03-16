@@ -148,6 +148,10 @@ namespace dxvk {
     DxvkShaderCompileFlags flags = 0u;
     /// SPIR-V lowering flags
     DxvkShaderSpirvFlags spirv = 0u;
+    /// Whether shaders may emit ClipDistance built-ins.
+    bool enableClipDistance = false;
+    /// Whether shaders may emit CullDistance built-ins.
+    bool enableCullDistance = false;
     /// Maximum uniform buffer size, in bytes. Constant buffer bindings
     /// larger than this will be lowered to a storage buffer.
     uint32_t maxUniformBufferSize = 0u;
