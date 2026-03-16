@@ -17,6 +17,7 @@ jobs:
     - name: Fetch upstream tags
       shell: bash
       run: |
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
         git remote add upstream https://github.com/doitsujin/dxvk.git 2>/dev/null || \
           git remote set-url upstream https://github.com/doitsujin/dxvk.git
         git fetch upstream --tags --force
@@ -56,6 +57,7 @@ jobs:
     - name: Fetch upstream tags
       shell: bash
       run: |
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
         git remote add upstream https://github.com/doitsujin/dxvk.git 2>/dev/null || \
           git remote set-url upstream https://github.com/doitsujin/dxvk.git
         git fetch upstream --tags --force
