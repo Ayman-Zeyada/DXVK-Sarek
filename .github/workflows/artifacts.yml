@@ -14,6 +14,13 @@ jobs:
         submodules: recursive
         fetch-depth: 0
 
+    - name: Fetch upstream tags
+      shell: bash
+      run: |
+        git remote add upstream https://github.com/doitsujin/dxvk.git 2>/dev/null || \
+          git remote set-url upstream https://github.com/doitsujin/dxvk.git
+        git fetch upstream --tags --force
+
     - name: Setup problem matcher
       uses: Joshua-Ashton/gcc-problem-matcher@v3
 
@@ -45,6 +52,13 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
+
+    - name: Fetch upstream tags
+      shell: bash
+      run: |
+        git remote add upstream https://github.com/doitsujin/dxvk.git 2>/dev/null || \
+          git remote set-url upstream https://github.com/doitsujin/dxvk.git
+        git fetch upstream --tags --force
 
     - name: Setup problem matcher
       uses: Joshua-Ashton/gcc-problem-matcher@v3

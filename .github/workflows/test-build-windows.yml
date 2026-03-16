@@ -14,6 +14,13 @@ jobs:
         submodules: recursive
         fetch-depth: 0
 
+    - name: Fetch upstream tags
+      shell: bash
+      run: |
+        git remote add upstream https://github.com/doitsujin/dxvk.git 2>/dev/null || \
+          git remote set-url upstream https://github.com/doitsujin/dxvk.git
+        git fetch upstream --tags --force
+
     - name: Setup glslangValidator
       shell: pwsh
       run: |
