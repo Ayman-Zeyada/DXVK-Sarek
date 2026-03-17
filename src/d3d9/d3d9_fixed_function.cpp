@@ -14,6 +14,7 @@
 #include <cfloat>
 
 #include <d3d9_fixed_function_vert.h>
+#include <d3d9_fixed_function_vert_noclip.h>
 #include <d3d9_fixed_function_frag.h>
 #include <d3d9_fixed_function_frag_sample.h>
 
@@ -2741,6 +2742,9 @@ namespace dxvk {
           D3D9ShaderType        ShaderType) {
 
     bool isVS = ShaderType == D3D9ShaderType::VertexShader;
+    D3D9FixedFunctionOptions options(
+      pDevice->GetDXVKDevice(),
+      pDevice->GetOptions());
 
     if (isVS) {
       std::array<DxvkBindingInfo, 4> bindings;
@@ -2796,7 +2800,9 @@ namespace dxvk {
       info.samplerHeap = DxvkShaderBinding();
       info.debugName = "FF VS";
 
-      m_shader = new DxvkSpirvShader(info, d3d9_fixed_function_vert);
+      m_shader = options.enableClipDistance
+        ? new DxvkSpirvShader(info, d3d9_fixed_function_vert)
+        : new DxvkSpirvShader(info, d3d9_fixed_function_vert_noclip);
     } else {
       std::vector<DxvkBindingInfo> bindings;
 
