@@ -4,8 +4,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <version.h>
-
 #include "../dxso/dxso_options.h"
 #include "../dxvk/dxvk_hash.h"
 #include "../dxvk/dxvk_shader_cache.h"

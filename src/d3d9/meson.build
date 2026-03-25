@@ -80,7 +80,7 @@ if platform != 'windows'
   d3d9_link_depends += files('d3d9.sym')
 endif
 
-d3d9_dll = shared_library(dxvk_name_prefix+'d3d9', d3d9_src, d3d9_shader_headers, d3d9_fixed_function_vert_noclip, d3d9_res,
+d3d9_dll = shared_library(dxvk_name_prefix+'d3d9', d3d9_src, d3d9_shader_headers, d3d9_fixed_function_vert_noclip, d3d9_res, dxvk_version,
   dependencies        : [ dxso_dep, dxvk_dep ],
   include_directories : dxvk_include_path,
   install             : true,

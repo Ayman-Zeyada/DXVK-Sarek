@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstring>
+#include <version.h>
 
 #include "d3d9_shader_cache.h"
 
