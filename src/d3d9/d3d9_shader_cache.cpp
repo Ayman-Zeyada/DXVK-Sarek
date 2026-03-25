@@ -1,3 +1,4 @@
+#include <iomanip>
 #include <algorithm>
 #include <cstring>
 #include <version.h>
@@ -235,20 +236,59 @@ namespace dxvk {
   }
 
 
-  DxvkShaderCache::FilePaths D3D9ShaderCache::getFilePaths() {
-    auto paths = DxvkShaderCache::getDefaultFilePaths();
+  D3D9ShaderCache::FilePaths D3D9ShaderCache::getFilePaths() {
+    std::string cachePath = env::getEnvVar("DXVK_SHADER_CACHE_PATH");
 
-    auto rewriteSuffix = [] (std::string& name, const char* suffix, const char* replacement) {
-      size_t suffixLen = std::strlen(suffix);
+    if (cachePath.empty()) {
+      #ifdef _WIN32
+      cachePath = env::getEnvVar("LOCALAPPDATA");
+      #endif
 
-      if (name.size() >= suffixLen && !name.compare(name.size() - suffixLen, suffixLen, suffix)) {
-        name.erase(name.size() - suffixLen, suffixLen);
-        name += replacement;
+      if (cachePath.empty())
+        cachePath = env::getEnvVar("XDG_CACHE_HOME");
+
+      if (cachePath.empty()) {
+        cachePath = env::getEnvVar("HOME");
+
+        if (!cachePath.empty()) {
+          cachePath += env::PlatformDirSlash;
+          cachePath += ".cache";
+        }
       }
-    };
 
-    rewriteSuffix(paths.lutFile, ".dxvk.lut", ".d3d9.dxvk.lut");
-    rewriteSuffix(paths.binFile, ".dxvk.bin", ".d3d9.dxvk.bin");
+      if (!cachePath.empty()) {
+        cachePath += env::PlatformDirSlash;
+        cachePath += "dxvk";
+      }
+    }
+
+    if (cachePath.empty())
+      return FilePaths();
+
+    std::string exePath = env::getExePath();
+
+    if (exePath.empty())
+      return FilePaths();
+
+    size_t pathStart = exePath.find_last_of(env::PlatformDirSlash);
+
+    if (pathStart != std::string::npos)
+      pathStart = exePath.find_last_of(env::PlatformDirSlash, pathStart);
+
+    if (pathStart == std::string::npos)
+      pathStart = 0u;
+
+    uint64_t hash = bit::fnv1a_init();
+
+    for (size_t i = pathStart; i < exePath.size(); i++)
+      hash = bit::fnv1a_iter(hash, uint8_t(exePath[i]));
+
+    std::string baseName = str::format(std::hex, std::setw(16u), std::setfill('0'), hash);
+
+    FilePaths paths;
+    paths.directory = cachePath;
+    paths.lutFile = baseName + ".d3d9.dxvk.lut";
+    paths.binFile = baseName + ".d3d9.dxvk.bin";
     return paths;
   }
 

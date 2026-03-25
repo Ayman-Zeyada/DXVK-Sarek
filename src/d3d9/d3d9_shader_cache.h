@@ -6,9 +6,9 @@
 
 #include "../dxso/dxso_options.h"
 #include "../dxvk/dxvk_hash.h"
-#include "../dxvk/dxvk_shader_cache.h"
 #include "../util/rc/util_rc.h"
 #include "../util/thread.h"
+#include "../util/util_env.h"
 #include "../util/util_file.h"
 
 #include "d3d9_constant_layout.h"
@@ -40,6 +40,12 @@ namespace dxvk {
 
   private:
 
+    struct FilePaths {
+      std::string directory;
+      std::string lutFile;
+      std::string binFile;
+    };
+
     struct Instance {
       dxvk::mutex         mutex;
       Rc<D3D9ShaderCache> instance;
@@ -67,11 +73,11 @@ namespace dxvk {
 
     static Instance s_instance;
 
-    DxvkShaderCache::FilePaths m_filePaths;
-    dxvk::mutex                m_mutex;
-    util::File                 m_lutFile;
-    util::File                 m_binFile;
-    Status                     m_status = Status::Uninitialized;
+    FilePaths    m_filePaths;
+    dxvk::mutex  m_mutex;
+    util::File   m_lutFile;
+    util::File   m_binFile;
+    Status       m_status = Status::Uninitialized;
 
     std::unordered_map<LutKey, LutEntry, DxvkHash, DxvkEq> m_lut;
 
@@ -91,7 +97,7 @@ namespace dxvk {
       const LutKey&             key,
       const D3D9CommonShader&   shader);
 
-    static DxvkShaderCache::FilePaths getFilePaths();
+    static FilePaths getFilePaths();
 
     static bool writeHeader(util::File& stream);
     static bool writeString(util::File& stream, const std::string& string);
