@@ -1,12 +1,48 @@
 #include "d3d9_shader.h"
+#include "d3d9_shader_cache.h"
 
 #include "d3d9_caps.h"
 #include "d3d9_device.h"
 #include "d3d9_util.h"
 
+#include "../dxvk/dxvk_shader_spirv.h"
+
+#include <cstring>
+#include <sstream>
+
 namespace dxvk {
 
   D3D9CommonShader::D3D9CommonShader() {}
+
+  D3D9CommonShader::D3D9CommonShader(
+          D3D9DeviceEx*           pDevice,
+          D3D9CachedShaderData&&  cachedShader)
+    : m_isgn                ( std::move(cachedShader.isgn) )
+    , m_usedSamplers        ( cachedShader.usedSamplers )
+    , m_usedRTs             ( cachedShader.usedRTs )
+    , m_textureTypes        ( cachedShader.textureTypes )
+    , m_info                ( cachedShader.info )
+    , m_meta                ( cachedShader.meta )
+    , m_constants           ( std::move(cachedShader.constants) )
+    , m_maxDefinedFloatConst( cachedShader.maxDefinedFloatConst )
+    , m_maxDefinedIntConst  ( cachedShader.maxDefinedIntConst )
+    , m_maxDefinedBoolConst ( cachedShader.maxDefinedBoolConst ) {
+    DxvkSpirvShaderCreateInfo info;
+    info.bindingCount = cachedShader.bindings.size();
+    info.bindings = cachedShader.bindings.data();
+    info.flatShadingInputs = cachedShader.flatShadingInputs;
+    info.sharedPushData = cachedShader.sharedPushData;
+    info.localPushData = cachedShader.localPushData;
+    info.samplerHeap = cachedShader.samplerHeap;
+    info.xfbRasterizedStream = cachedShader.xfbRasterizedStream;
+    info.patchVertexCount = cachedShader.patchVertexCount;
+    info.debugName = cachedShader.debugName;
+
+    m_shader = new DxvkSpirvShader(info,
+      SpirvCodeBuffer(cachedShader.spirv.size(), cachedShader.spirv.data()));
+
+    pDevice->GetDXVKDevice()->registerShader(m_shader);
+  }
 
   D3D9CommonShader::D3D9CommonShader(
             D3D9DeviceEx*         pDevice,
@@ -86,6 +122,85 @@ namespace dxvk {
   }
 
 
+  D3D9CachedShaderData D3D9CommonShader::getCacheData() const {
+    D3D9CachedShaderData result;
+    result.isgn = m_isgn;
+    result.usedSamplers = m_usedSamplers;
+    result.usedRTs = m_usedRTs;
+    result.textureTypes = m_textureTypes;
+    result.info = m_info;
+    result.meta = m_meta;
+    result.constants = m_constants;
+    result.maxDefinedFloatConst = m_maxDefinedFloatConst;
+    result.maxDefinedIntConst = m_maxDefinedIntConst;
+    result.maxDefinedBoolConst = m_maxDefinedBoolConst;
+    result.debugName = m_shader->debugName();
+
+    const auto& metadata = m_shader->metadata();
+    result.flatShadingInputs = metadata.flatShadingInputs;
+    result.xfbRasterizedStream = metadata.rasterizedStream;
+    result.patchVertexCount = metadata.patchVertexCount;
+
+    auto layout = m_shader->getLayout();
+    auto bindings = layout.getBindings();
+
+    result.bindings.reserve(bindings.bindingCount);
+
+    for (size_t i = 0u; i < bindings.bindingCount; i++) {
+      const auto& descriptor = bindings.bindings[i];
+
+      DxvkBindingInfo binding;
+      binding.set = descriptor.getSet();
+      binding.binding = descriptor.getBinding();
+      binding.resourceIndex = descriptor.getResourceIndex();
+      binding.descriptorType = descriptor.getDescriptorType();
+      binding.descriptorCount = descriptor.getDescriptorCount();
+      binding.viewType = descriptor.getViewType();
+      binding.access = descriptor.getAccess();
+      binding.accessOp = descriptor.getAccessOp();
+      binding.blockOffset = descriptor.getBlockOffset();
+
+      if (descriptor.isUniformBuffer())
+        binding.flags.set(DxvkDescriptorFlag::UniformBuffer);
+
+      if (descriptor.isMultisampled())
+        binding.flags.set(DxvkDescriptorFlag::Multisampled);
+
+      if (!descriptor.usesDescriptor())
+        binding.flags.set(DxvkDescriptorFlag::PushData);
+
+      result.bindings.push_back(binding);
+    }
+
+    uint32_t pushMask = layout.getPushDataMask();
+    for (uint32_t i = 0u; i < DxvkPushDataBlock::MaxBlockCount; i++) {
+      if (!(pushMask & (1u << i)))
+        continue;
+
+      auto block = layout.getPushDataBlock(i);
+
+      if (block.isShared())
+        result.sharedPushData = block;
+      else
+        result.localPushData = block;
+    }
+
+    if (layout.getSamplerHeapBindingCount())
+      result.samplerHeap = layout.getSamplerHeapBinding(0u);
+
+    std::ostringstream stream(std::ios::binary);
+    m_shader->dump(stream);
+
+    std::string code = stream.str();
+    if ((code.size() % sizeof(uint32_t)) == 0u) {
+      result.spirv.resize(code.size() / sizeof(uint32_t));
+      std::memcpy(result.spirv.data(), code.data(), code.size());
+    }
+
+    return result;
+  }
+
+
   void D3D9ShaderModuleSet::GetShaderModule(
             D3D9DeviceEx*         pDevice,
             D3D9CommonShader*     pShaderModule,
@@ -150,6 +265,29 @@ namespace dxvk {
         return;
       }
     }
+
+    const auto& constantLayout = ShaderStage == VK_SHADER_STAGE_VERTEX_BIT
+      ? pDevice->GetVertexConstantLayout()
+      : pDevice->GetPixelConstantLayout();
+
+    if (env::getEnvVar("DXVK_SHADER_CACHE") != "0" && options->shaderDumpPath.empty()) {
+      D3D9CachedShaderData cachedShader;
+
+      if (D3D9ShaderCache::getInstance()->loadShader(
+            lookupKey.toString(),
+            ShaderStage,
+            pDxbcModuleInfo->options,
+            constantLayout,
+            cachedShader)) {
+        *pShaderModule = D3D9CommonShader(pDevice, std::move(cachedShader));
+
+        std::unique_lock<dxvk::mutex> lock(m_mutex);
+        auto status = m_modules.insert({ lookupKey, *pShaderModule });
+        if (!status.second)
+          *pShaderModule = status.first->second;
+        return;
+      }
+    }
     
     // This shader has not been compiled yet, so we have to create a
     // new module. This takes a while, so we won't lock the structure.
@@ -157,6 +295,15 @@ namespace dxvk {
       pDevice, ShaderStage, lookupKey,
       pDxbcModuleInfo, pShaderBytecode,
       info, &module);
+
+    if (env::getEnvVar("DXVK_SHADER_CACHE") != "0" && options->shaderDumpPath.empty()) {
+      D3D9ShaderCache::getInstance()->storeShader(
+        lookupKey.toString(),
+        ShaderStage,
+        pDxbcModuleInfo->options,
+        constantLayout,
+        *pShaderModule);
+    }
 
     const int32_t maxFloatConstantIndex = pShaderModule->GetMaxDefinedFloatConstant();
     const int32_t maxIntConstantIndex = pShaderModule->GetMaxDefinedIntConstant();

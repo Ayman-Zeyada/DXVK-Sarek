@@ -981,6 +981,7 @@ namespace dxvk {
     info.sharedPushData = DxvkPushDataBlock(0u, sizeof(D3D9RenderStateInfo), 4u, 0u);
     info.localPushData = m_samplerBlock;
     info.samplerHeap = DxvkShaderBinding(VK_SHADER_STAGE_ALL, GetGlobalSamplerSetIndex(), 0u);
+    info.debugName = m_filename;
 
     return new DxvkSpirvShader(info, m_module.compile());
   }

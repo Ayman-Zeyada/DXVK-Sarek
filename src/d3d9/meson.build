@@ -48,6 +48,7 @@ d3d9_src = [
   'd3d9_common_buffer.cpp',
   'd3d9_buffer.cpp',
   'd3d9_shader.cpp',
+  'd3d9_shader_cache.cpp',
   'd3d9_vertex_declaration.cpp',
   'd3d9_query.cpp',
   'd3d9_shader_validator.cpp',

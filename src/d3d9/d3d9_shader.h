@@ -28,6 +28,10 @@ namespace dxvk {
     D3D9CommonShader();
 
     D3D9CommonShader(
+            D3D9DeviceEx*           pDevice,
+            struct D3D9CachedShaderData&& cachedShader);
+
+    D3D9CommonShader(
             D3D9DeviceEx*         pDevice,
             VkShaderStageFlagBits ShaderStage,
       const DxvkShaderHash&       Key,
@@ -62,6 +66,14 @@ namespace dxvk {
 
     int32_t GetMaxDefinedBoolConstant() const { return m_maxDefinedBoolConst; }
 
+    uint32_t GetUsedSamplers() const { return m_usedSamplers; }
+
+    uint32_t GetUsedRTs() const { return m_usedRTs; }
+
+    uint32_t GetTextureTypes() const { return m_textureTypes; }
+
+    struct D3D9CachedShaderData getCacheData() const;
+
     VkImageViewType GetImageViewType(uint32_t samplerSlot) const {
       const uint32_t offset = samplerSlot * 2;
       const uint32_t mask = 0b11;
@@ -84,6 +96,29 @@ namespace dxvk {
 
     Rc<DxvkShader>        m_shader;
 
+  };
+
+  struct D3D9CachedShaderData {
+    DxsoIsgn                    isgn;
+    uint32_t                    usedSamplers = 0u;
+    uint32_t                    usedRTs = 0u;
+    uint32_t                    textureTypes = 0u;
+    DxsoProgramInfo             info;
+    DxsoShaderMetaInfo          meta;
+    DxsoDefinedConstants        constants;
+    int32_t                     maxDefinedFloatConst = -1;
+    int32_t                     maxDefinedIntConst = -1;
+    int32_t                     maxDefinedBoolConst = -1;
+
+    std::vector<DxvkBindingInfo> bindings;
+    uint32_t                    flatShadingInputs = 0u;
+    DxvkPushDataBlock           sharedPushData;
+    DxvkPushDataBlock           localPushData;
+    DxvkShaderBinding           samplerHeap;
+    int32_t                     xfbRasterizedStream = 0;
+    uint32_t                    patchVertexCount = 0u;
+    std::string                 debugName;
+    std::vector<uint32_t>       spirv;
   };
 
   /**

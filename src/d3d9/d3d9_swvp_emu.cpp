@@ -86,7 +86,8 @@ namespace dxvk {
   public:
 
     D3D9SWVPEmulatorGenerator(const std::string& name)
-    : m_module(spvVersion(1, 3)) {
+    : m_module(spvVersion(1, 3))
+    , m_name(name) {
       m_entryPointId = m_module.allocateId();
 
       m_module.setDebugSource(
@@ -312,6 +313,7 @@ namespace dxvk {
       info.bindingCount = 1;
       info.bindings = &m_bufferBinding;
       info.localPushData = DxvkPushDataBlock(MaxSharedPushDataSize, sizeof(D3D9SwvpEmuArgs), 4u, 0u);
+      info.debugName = m_name;
 
       return new DxvkSpirvShader(info, m_module.compile());
     }
@@ -319,6 +321,7 @@ namespace dxvk {
   private:
 
     SpirvModule m_module;
+    std::string           m_name;
 
     uint32_t              m_entryPointId = 0;
     uint32_t              m_inputMask = 0u;

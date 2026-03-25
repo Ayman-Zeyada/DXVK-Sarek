@@ -255,6 +255,7 @@ namespace dxvk {
 
   private:
 
+    std::string                m_fileName;
     DxsoModuleInfo             m_moduleInfo;
     DxsoProgramInfo            m_programInfo;
     const DxsoAnalysisInfo*    m_analysis;

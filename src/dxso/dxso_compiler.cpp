@@ -20,7 +20,8 @@ namespace dxvk {
     const DxsoProgramInfo&    programInfo,
     const DxsoAnalysisInfo&   analysis,
     const D3D9ConstantLayout& layout)
-    : m_moduleInfo ( moduleInfo )
+    : m_fileName   ( fileName )
+    , m_moduleInfo ( moduleInfo )
     , m_programInfo( programInfo )
     , m_analysis   ( &analysis )
     , m_layout     ( &layout )
@@ -230,6 +231,7 @@ namespace dxvk {
     info.sharedPushData = DxvkPushDataBlock(0u, sizeof(D3D9RenderStateInfo), 4u, 0u);
     info.localPushData = m_samplerPushData;
     info.samplerHeap = DxvkShaderBinding(VK_SHADER_STAGE_ALL, GetGlobalSamplerSetIndex(), 0u);
+    info.debugName = m_fileName;
 
     if (m_programInfo.type() == DxsoProgramTypes::PixelShader)
       info.flatShadingInputs = m_ps.flatShadingMask;
