@@ -1,3 +1,5 @@
+#include <cstring>
+
 #include "../util/util_time.h"
 
 #include "dxvk_device.h"
@@ -18,34 +20,37 @@ namespace dxvk {
     if (m_shaders.tes != nullptr) m_shaders.tes->defineResourceSlots(m_slotMapping);
     if (m_shaders.gs  != nullptr) m_shaders.gs ->defineResourceSlots(m_slotMapping);
     if (m_shaders.fs  != nullptr) m_shaders.fs ->defineResourceSlots(m_slotMapping);
-    
+
     m_slotMapping.makeDescriptorsDynamic(
       pipeMgr->m_device->options().maxNumDynamicUniformBuffers,
       pipeMgr->m_device->options().maxNumDynamicStorageBuffers);
-    
+
     m_layout = new DxvkPipelineLayout(m_vkd,
       m_slotMapping, VK_PIPELINE_BIND_POINT_GRAPHICS);
-    
+
     m_vsIn  = m_shaders.vs != nullptr ? m_shaders.vs->info().inputMask  : 0;
     m_fsOut = m_shaders.fs != nullptr ? m_shaders.fs->info().outputMask : 0;
 
     if (m_shaders.gs != nullptr && m_shaders.gs->flags().test(DxvkShaderFlag::HasTransformFeedback))
       m_flags.set(DxvkGraphicsPipelineFlag::HasTransformFeedback);
-    
+
     if (m_layout->getStorageDescriptorStages())
       m_flags.set(DxvkGraphicsPipelineFlag::HasStorageDescriptors);
-    
+
     m_common.msSampleShadingEnable = m_shaders.fs != nullptr && m_shaders.fs->flags().test(DxvkShaderFlag::HasSampleRateShading);
     m_common.msSampleShadingFactor = 1.0f;
+
+    for (auto& slot : m_queuedSet)
+      slot.store(0, std::memory_order_relaxed);
   }
-  
-  
+
+
   DxvkGraphicsPipeline::~DxvkGraphicsPipeline() {
     for (const auto& instance : m_pipelines)
       this->destroyPipeline(instance.pipeline());
   }
-  
-  
+
+
   Rc<DxvkShader> DxvkGraphicsPipeline::getShader(
           VkShaderStageFlagBits             stage) const {
     switch (stage) {
@@ -63,55 +68,266 @@ namespace dxvk {
   VkPipeline DxvkGraphicsPipeline::getPipelineHandle(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
-    DxvkGraphicsPipelineInstance* instance = this->findInstance(state, renderPass);
+    DxvkGraphicsPipelineInstance* instance = this->findInstanceLockFree(state, renderPass);
 
-    if (unlikely(!instance)) {
-      // Exit early if the state vector is invalid
-      if (!this->validatePipelineState(state, true))
-        return VK_NULL_HANDLE;
+    if (likely(instance != nullptr))
+      return instance->pipeline();
 
-      // Prevent other threads from adding new instances and check again
-      std::lock_guard<dxvk::mutex> lock(m_mutex);
-      instance = this->findInstance(state, renderPass);
+    if (!this->validatePipelineState(state, true))
+      return VK_NULL_HANDLE;
 
-      if (!instance) {
-        // Keep pipeline object locked, at worst we're going to stall
-        // a state cache worker and the current thread needs priority.
-        instance = this->createInstance(state, renderPass);
-        this->writePipelineStateToCache(state, renderPass->format());
+    VkPipeline fallback = this->findFallback(renderPass);
+
+    if (fallback != VK_NULL_HANDLE && m_pipeMgr->m_compiler != nullptr) {
+      size_t h    = computeInstanceHash(state, renderPass);
+      uint32_t qs = uint32_t(h) & QueuedSetMask;
+      size_t expected = 0;
+      if (m_queuedSet[qs].compare_exchange_strong(expected, h,
+              std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        if (!m_pipeMgr->m_compiler->queueCompilation(
+              this, state, renderPass, DxvkPipelinePriority::Live)) {
+          m_queuedSet[qs].store(0, std::memory_order_release);
+        }
+      } else if (expected != h) {
+        uint32_t qs2 = ((qs >> 7) ^ qs ^ 0x55u) & QueuedSetMask;
+        expected = 0;
+        if (m_queuedSet[qs2].compare_exchange_strong(expected, h,
+                std::memory_order_acq_rel, std::memory_order_relaxed)) {
+          if (!m_pipeMgr->m_compiler->queueCompilation(
+                this, state, renderPass, DxvkPipelinePriority::Live)) {
+            m_queuedSet[qs2].store(0, std::memory_order_release);
+          }
+        }
       }
+      return fallback;
     }
+
+    instance = this->findInstanceLockFree(state, renderPass);
+    if (instance != nullptr)
+      return instance->pipeline();
+
+    instance = this->createInstance(state, renderPass);
+    this->writePipelineStateToCache(state, renderPass->format());
+
+    if (instance == nullptr)
+      return VK_NULL_HANDLE;
 
     return instance->pipeline();
   }
 
 
-  void DxvkGraphicsPipeline::compilePipeline(
+  bool DxvkGraphicsPipeline::compilePipeline(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
-    // Exit early if the state vector is invalid
     if (!this->validatePipelineState(state, false))
-      return;
+      return false;
 
-    // Keep the object locked while compiling a pipeline since compiling
-    // similar pipelines concurrently is fragile on some drivers
-    std::lock_guard<dxvk::mutex> lock(m_mutex);
+    if (this->findInstanceLockFree(state, renderPass) != nullptr)
+      return false;
 
-    if (!this->findInstance(state, renderPass))
-      this->createInstance(state, renderPass);
+    auto* instance = this->createInstance(state, renderPass);
+    bool result = (instance != nullptr);
+
+    size_t h    = computeInstanceHash(state, renderPass);
+    uint32_t qs = uint32_t(h) & QueuedSetMask;
+    size_t current = m_queuedSet[qs].load(std::memory_order_acquire);
+    if (current == h)
+      m_queuedSet[qs].compare_exchange_strong(current, size_t(0),
+        std::memory_order_release, std::memory_order_relaxed);
+    uint32_t qs2 = ((qs >> 7) ^ qs ^ 0x55u) & QueuedSetMask;
+    current = m_queuedSet[qs2].load(std::memory_order_acquire);
+    if (current == h)
+      m_queuedSet[qs2].compare_exchange_strong(current, size_t(0),
+        std::memory_order_release, std::memory_order_relaxed);
+
+    return result;
+  }
+
+
+  size_t DxvkGraphicsPipeline::computeInstanceHash(
+    const DxvkGraphicsPipelineStateInfo& state,
+    const DxvkRenderPass*                renderPass) {
+    DxvkHashState hash;
+    hash.add(reinterpret_cast<uintptr_t>(renderPass));
+    const auto* data = reinterpret_cast<const uint8_t*>(&state);
+    size_t remaining = sizeof(state);
+    size_t offset = 0;
+    while (remaining >= sizeof(size_t)) {
+      size_t word;
+      std::memcpy(&word, data + offset, sizeof(size_t));
+      hash.add(word);
+      offset    += sizeof(size_t);
+      remaining -= sizeof(size_t);
+    }
+    if (remaining > 0) {
+      size_t word = 0;
+      std::memcpy(&word, data + offset, remaining);
+      hash.add(word);
+    }
+    size_t h = static_cast<size_t>(hash);
+    return h == 0 ? 1 : h;
+  }
+
+
+  DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::findInstanceLockFree(
+    const DxvkGraphicsPipelineStateInfo& state,
+    const DxvkRenderPass*                renderPass) {
+    size_t h = computeInstanceHash(state, renderPass);
+
+    for (uint32_t i = 0; i < MaxProbeDistance; i++) {
+      uint32_t slot = (uint32_t(h) + i) & InstanceMapMask;
+      size_t stored = m_instanceMap[slot].hash.load(std::memory_order_acquire);
+
+      if (stored == 0)
+        break;
+
+      if (stored == h) {
+        auto* inst = m_instanceMap[slot].instance.load(std::memory_order_acquire);
+        if (inst != nullptr && inst->isCompatible(state, renderPass))
+          return inst;
+      }
+    }
+
+    if (!m_instanceMapOverflow.load(std::memory_order_acquire))
+      return nullptr;
+
+    size_t h2 = (h ^ (h >> 16)) * 0x45d9f3bu;
+    for (uint32_t i = 0; i < OverflowProbeMax; i++) {
+      uint32_t slot = (uint32_t(h2) + i) & OverflowMapMask;
+      size_t stored = m_overflowMap[slot].hash.load(std::memory_order_acquire);
+
+      if (stored == 0)
+        return nullptr;
+
+      if (stored == h) {
+        auto* inst = m_overflowMap[slot].instance.load(std::memory_order_acquire);
+        if (inst != nullptr && inst->isCompatible(state, renderPass))
+          return inst;
+      }
+    }
+
+    return nullptr;
+  }
+
+
+  void DxvkGraphicsPipeline::insertInstanceToMap(
+    const DxvkGraphicsPipelineStateInfo& state,
+    const DxvkRenderPass*                renderPass,
+    DxvkGraphicsPipelineInstance*         inst) {
+    size_t h = computeInstanceHash(state, renderPass);
+
+    for (uint32_t i = 0; i < MaxProbeDistance; i++) {
+      uint32_t slot = (uint32_t(h) + i) & InstanceMapMask;
+      size_t expected = 0;
+
+      if (m_instanceMap[slot].hash.compare_exchange_strong(
+              expected, h, std::memory_order_acq_rel)) {
+        m_instanceMap[slot].instance.store(inst, std::memory_order_release);
+        return;
+      }
+
+      if (expected == h) {
+        auto* existing = m_instanceMap[slot].instance.load(std::memory_order_acquire);
+        if (existing != nullptr) {
+          if (existing->isCompatible(state, renderPass))
+            return;
+          continue;
+        }
+        m_instanceMap[slot].instance.store(inst, std::memory_order_release);
+        return;
+      }
+    }
+
+    m_instanceMapOverflow.store(true, std::memory_order_release);
+
+    size_t h2 = (h ^ (h >> 16)) * 0x45d9f3bu;
+    for (uint32_t i = 0; i < OverflowProbeMax; i++) {
+      uint32_t slot = (uint32_t(h2) + i) & OverflowMapMask;
+      size_t expected = 0;
+
+      if (m_overflowMap[slot].hash.compare_exchange_strong(
+              expected, h, std::memory_order_acq_rel)) {
+        m_overflowMap[slot].instance.store(inst, std::memory_order_release);
+        return;
+      }
+
+      if (expected == h) {
+        auto* existing = m_overflowMap[slot].instance.load(std::memory_order_acquire);
+        if (existing != nullptr) {
+          if (existing->isCompatible(state, renderPass))
+            return;
+          continue;
+        }
+        m_overflowMap[slot].instance.store(inst, std::memory_order_release);
+        return;
+      }
+    }
   }
 
 
   DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::createInstance(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
+    auto* existing = this->findInstanceLockFree(state, renderPass);
+    if (existing != nullptr)
+      return existing;
+
     VkPipeline pipeline = this->createPipeline(state, renderPass);
 
+    existing = this->findInstanceLockFree(state, renderPass);
+    if (existing != nullptr) {
+      this->destroyPipeline(pipeline);
+      return existing;
+    }
+
     m_pipeMgr->m_numGraphicsPipelines += 1;
-    return &(*m_pipelines.emplace(state, renderPass, pipeline));
+    auto& inst = *m_pipelines.emplace(state, renderPass, pipeline);
+
+    this->insertInstanceToMap(state, renderPass, &inst);
+
+    if (pipeline != VK_NULL_HANDLE && !m_hasBasePipeline.load(std::memory_order_acquire)) {
+      VkPipeline expected = VK_NULL_HANDLE;
+      if (m_basePipeline.compare_exchange_strong(expected, pipeline,
+              std::memory_order_release, std::memory_order_relaxed))
+        m_hasBasePipeline.store(true, std::memory_order_release);
+    }
+
+    if (pipeline != VK_NULL_HANDLE) {
+      uintptr_t key = computeFallbackKey(renderPass);
+      size_t base = size_t(key) & FallbackMapMask;
+
+      for (uint32_t i = 0; i < FallbackProbeMax; i++) {
+        size_t slot = (base + i) & FallbackMapMask;
+        uintptr_t stored = m_fallbackMap[slot].key.load(std::memory_order_relaxed);
+
+        if (stored == key) {
+          m_fallbackMap[slot].pipeline.store(pipeline, std::memory_order_release);
+          m_fallbackMap[slot].used.store(1, std::memory_order_relaxed);
+          break;
+        }
+
+        uintptr_t expected = 0;
+        if (stored == 0 && m_fallbackMap[slot].key.compare_exchange_strong(
+                expected, key, std::memory_order_acq_rel)) {
+          m_fallbackMap[slot].pipeline.store(pipeline, std::memory_order_release);
+          m_fallbackMap[slot].used.store(1, std::memory_order_relaxed);
+          break;
+        }
+
+        if (i == FallbackProbeMax - 1) {
+          uint32_t evictIdx = m_fallbackEvictCounter.fetch_add(1, std::memory_order_relaxed) % FallbackProbeMax;
+          size_t evictSlot = (base + evictIdx) & FallbackMapMask;
+          m_fallbackMap[evictSlot].key.store(key, std::memory_order_release);
+          m_fallbackMap[evictSlot].pipeline.store(pipeline, std::memory_order_release);
+          m_fallbackMap[evictSlot].used.store(1, std::memory_order_relaxed);
+        }
+      }
+    }
+
+    return &inst;
   }
-  
-  
+
+
   DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::findInstance(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
@@ -119,11 +335,45 @@ namespace dxvk {
       if (instance.isCompatible(state, renderPass))
         return &instance;
     }
-    
+
     return nullptr;
   }
-  
-  
+
+
+  uintptr_t DxvkGraphicsPipeline::computeFallbackKey(
+    const DxvkRenderPass*                renderPass) {
+    uintptr_t key = reinterpret_cast<uintptr_t>(renderPass);
+    key = ((key >> 16) ^ key) * 0x45d9f3bu;
+    key = ((key >> 16) ^ key) * 0x45d9f3bu;
+    key = (key >> 16) ^ key;
+    return key;
+  }
+
+  VkPipeline DxvkGraphicsPipeline::findFallback(
+    const DxvkRenderPass*                renderPass) {
+    uintptr_t key = computeFallbackKey(renderPass);
+    size_t base = size_t(key) & FallbackMapMask;
+
+    for (uint32_t i = 0; i < FallbackProbeMax; i++) {
+      size_t slot = (base + i) & FallbackMapMask;
+      uintptr_t stored = m_fallbackMap[slot].key.load(std::memory_order_acquire);
+
+      if (stored == key) {
+        VkPipeline p = m_fallbackMap[slot].pipeline.load(std::memory_order_acquire);
+        if (p != VK_NULL_HANDLE) {
+          m_fallbackMap[slot].used.store(1, std::memory_order_relaxed);
+          return p;
+        }
+      }
+
+      if (stored == 0)
+        return VK_NULL_HANDLE;
+    }
+
+    return VK_NULL_HANDLE;
+  }
+
+
   VkPipeline DxvkGraphicsPipeline::createPipeline(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) const {
@@ -134,23 +384,23 @@ namespace dxvk {
 
     // Render pass format and image layouts
     DxvkRenderPassFormat passFormat = renderPass->format();
-    
+
     // Set up dynamic states as needed
     std::array<VkDynamicState, 6> dynamicStates;
     uint32_t                      dynamicStateCount = 0;
-    
+
     dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_VIEWPORT;
     dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_SCISSOR;
 
     if (state.useDynamicDepthBias())
       dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_DEPTH_BIAS;
-    
+
     if (state.useDynamicDepthBounds())
       dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_DEPTH_BOUNDS;
-    
+
     if (state.useDynamicBlendConstants())
       dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_BLEND_CONSTANTS;
-    
+
     if (state.useDynamicStencilRef())
       dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_STENCIL_REFERENCE;
 
@@ -161,14 +411,14 @@ namespace dxvk {
       sampleCount = VkSampleCountFlagBits(state.ms.sampleCount());
     else if (state.rs.sampleCount())
       sampleCount = VkSampleCountFlagBits(state.rs.sampleCount());
-    
+
     // Set up some specialization constants
     DxvkSpecConstants specData;
     specData.set(uint32_t(DxvkSpecConstantId::RasterizerSampleCount), sampleCount, VK_SAMPLE_COUNT_1_BIT);
-    
+
     for (uint32_t i = 0; i < m_layout->bindingCount(); i++)
       specData.set(i, state.bsBindingMask.test(i), true);
-    
+
     for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
       if ((m_fsOut & (1 << i)) != 0) {
         specData.set(uint32_t(DxvkSpecConstantId::ColorComponentMappings) + i,
@@ -179,9 +429,9 @@ namespace dxvk {
 
     for (uint32_t i = 0; i < MaxNumSpecConstants; i++)
       specData.set(getSpecId(i), state.sc.specConstants[i], 0u);
-    
+
     VkSpecializationInfo specInfo = specData.getSpecInfo();
-    
+
     auto vsm  = createShaderModule(m_shaders.vs,  state);
     auto tcsm = createShaderModule(m_shaders.tcs, state);
     auto tesm = createShaderModule(m_shaders.tes, state);
@@ -231,7 +481,7 @@ namespace dxvk {
       if (state.ilBindings[i].inputRate() == VK_VERTEX_INPUT_RATE_INSTANCE
        && state.ilBindings[i].divisor()   != 1) {
         const uint32_t id = viDivisorCount++;
-        
+
         viDivisorDesc[id].binding = i; /* see below */
         viDivisorDesc[id].divisor = state.ilBindings[i].divisor();
       }
@@ -240,7 +490,7 @@ namespace dxvk {
     int32_t rasterizedStream = m_shaders.gs != nullptr
       ? m_shaders.gs->info().xfbRasterizedStream
       : 0;
-    
+
     // Compact vertex bindings so that we can more easily update vertex buffers
     std::array<VkVertexInputAttributeDescription, MaxNumVertexAttributes> viAttribs;
     std::array<VkVertexInputBindingDescription,   MaxNumVertexBindings>   viBindings;
@@ -262,7 +512,7 @@ namespace dxvk {
     viDivisorInfo.pNext                     = nullptr;
     viDivisorInfo.vertexBindingDivisorCount = viDivisorCount;
     viDivisorInfo.pVertexBindingDivisors    = viDivisorDesc.data();
-    
+
     VkPipelineVertexInputStateCreateInfo viInfo;
     viInfo.sType                            = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     viInfo.pNext                            = &viDivisorInfo;
@@ -271,27 +521,27 @@ namespace dxvk {
     viInfo.pVertexBindingDescriptions       = viBindings.data();
     viInfo.vertexAttributeDescriptionCount  = state.il.attributeCount();
     viInfo.pVertexAttributeDescriptions     = viAttribs.data();
-    
+
     if (viDivisorCount == 0)
       viInfo.pNext = viDivisorInfo.pNext;
-    
+
     // TODO remove this once the extension is widely supported
     if (!m_pipeMgr->m_device->features().extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor)
       viInfo.pNext = viDivisorInfo.pNext;
-    
+
     VkPipelineInputAssemblyStateCreateInfo iaInfo;
     iaInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     iaInfo.pNext                  = nullptr;
     iaInfo.flags                  = 0;
     iaInfo.topology               = state.ia.primitiveTopology();
     iaInfo.primitiveRestartEnable = state.ia.primitiveRestart();
-    
+
     VkPipelineTessellationStateCreateInfo tsInfo;
     tsInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
     tsInfo.pNext                  = nullptr;
     tsInfo.flags                  = 0;
     tsInfo.patchControlPoints     = state.ia.patchVertexCount();
-    
+
     VkPipelineViewportStateCreateInfo vpInfo;
     vpInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
     vpInfo.pNext                  = nullptr;
@@ -300,7 +550,7 @@ namespace dxvk {
     vpInfo.pViewports             = nullptr;
     vpInfo.scissorCount           = state.rs.viewportCount();
     vpInfo.pScissors              = nullptr;
-    
+
     VkPipelineRasterizationConservativeStateCreateInfoEXT conservativeInfo;
     conservativeInfo.sType        = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT;
     conservativeInfo.pNext        = nullptr;
@@ -334,7 +584,7 @@ namespace dxvk {
     rsInfo.depthBiasClamp         = 0.0f;
     rsInfo.depthBiasSlopeFactor   = 0.0f;
     rsInfo.lineWidth              = 1.0f;
-    
+
     if (rasterizedStream > 0)
       xfbStreamInfo.pNext = std::exchange(rsInfo.pNext, &xfbStreamInfo);
 
@@ -358,7 +608,7 @@ namespace dxvk {
     msInfo.pSampleMask            = &sampleMask;
     msInfo.alphaToCoverageEnable  = state.ms.enableAlphaToCoverage();
     msInfo.alphaToOneEnable       = VK_FALSE;
-    
+
     VkPipelineDepthStencilStateCreateInfo dsInfo;
     dsInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     dsInfo.pNext                  = nullptr;
@@ -372,7 +622,7 @@ namespace dxvk {
     dsInfo.back                   = state.dsBack.state();
     dsInfo.minDepthBounds         = 0.0f;
     dsInfo.maxDepthBounds         = 1.0f;
-    
+
     VkPipelineColorBlendStateCreateInfo cbInfo;
     cbInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     cbInfo.pNext                  = nullptr;
@@ -381,17 +631,17 @@ namespace dxvk {
     cbInfo.logicOp                = state.om.logicOp();
     cbInfo.attachmentCount        = DxvkLimits::MaxNumRenderTargets;
     cbInfo.pAttachments           = omBlendAttachments.data();
-    
+
     for (uint32_t i = 0; i < 4; i++)
       cbInfo.blendConstants[i] = 0.0f;
-    
+
     VkPipelineDynamicStateCreateInfo dyInfo;
     dyInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dyInfo.pNext                  = nullptr;
     dyInfo.flags                  = 0;
     dyInfo.dynamicStateCount      = dynamicStateCount;
     dyInfo.pDynamicStates         = dynamicStates.data();
-    
+
     VkGraphicsPipelineCreateInfo info;
     info.sType                    = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     info.pNext                    = nullptr;
@@ -410,18 +660,23 @@ namespace dxvk {
     info.layout                   = m_layout->pipelineLayout();
     info.renderPass               = renderPass->getDefaultHandle();
     info.subpass                  = 0;
-    info.basePipelineHandle       = VK_NULL_HANDLE;
+    VkPipeline base = m_basePipeline.load(std::memory_order_acquire);
+    if (base != VK_NULL_HANDLE)
+      info.flags |= VK_PIPELINE_CREATE_DERIVATIVE_BIT;
+    else
+      info.flags |= VK_PIPELINE_CREATE_ALLOW_DERIVATIVES_BIT;
+    info.basePipelineHandle       = base;
     info.basePipelineIndex        = -1;
-    
+
     if (tsInfo.patchControlPoints == 0)
       info.pTessellationState = nullptr;
-    
+
     // Time pipeline compilation for debugging purposes
     dxvk::high_resolution_clock::time_point t0, t1;
 
     if (Logger::logLevel() <= LogLevel::Debug)
       t0 = dxvk::high_resolution_clock::now();
-    
+
     VkPipeline pipeline = VK_NULL_HANDLE;
     if (m_vkd->vkCreateGraphicsPipelines(m_vkd->device(),
           m_pipeMgr->m_cache->handle(), 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
@@ -429,7 +684,7 @@ namespace dxvk {
       this->logPipelineState(LogLevel::Error, state);
       return VK_NULL_HANDLE;
     }
-    
+
     if (Logger::logLevel() <= LogLevel::Debug) {
       t1 = dxvk::high_resolution_clock::now();
       auto td = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
@@ -438,8 +693,8 @@ namespace dxvk {
 
     return pipeline;
   }
-  
-  
+
+
   void DxvkGraphicsPipeline::destroyPipeline(VkPipeline pipeline) const {
     m_vkd->vkDestroyPipeline(m_vkd->device(), pipeline, nullptr);
   }
@@ -520,11 +775,11 @@ namespace dxvk {
 
     if (hasPatches != hasTcs || hasPatches != hasTes)
       return false;
-    
+
     // Filter out undefined primitive topologies
     if (state.ia.primitiveTopology() == VK_PRIMITIVE_TOPOLOGY_MAX_ENUM)
       return false;
-    
+
     // Prevent unintended out-of-bounds access to the IL arrays
     if (state.il.attributeCount() > DxvkLimits::MaxNumVertexAttributes
      || state.il.bindingCount()   > DxvkLimits::MaxNumVertexBindings)
@@ -594,14 +849,14 @@ namespace dxvk {
 
     return true;
   }
-  
-  
+
+
   void DxvkGraphicsPipeline::writePipelineStateToCache(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPassFormat&          format) const {
     if (m_pipeMgr->m_stateCache == nullptr)
       return;
-    
+
     DxvkStateCacheKey key;
     if (m_shaders.vs  != nullptr) key.vs = m_shaders.vs->getShaderKey();
     if (m_shaders.tcs != nullptr) key.tcs = m_shaders.tcs->getShaderKey();
@@ -611,8 +866,8 @@ namespace dxvk {
 
     m_pipeMgr->m_stateCache->addGraphicsPipeline(key, state, format);
   }
-  
-  
+
+
   void DxvkGraphicsPipeline::logPipelineState(
           LogLevel                       level,
     const DxvkGraphicsPipelineStateInfo& state) const {
@@ -630,8 +885,8 @@ namespace dxvk {
       const auto& bind = state.ilBindings[i];
       Logger::log(level, str::format("  binding ", i, " : binding ", bind.binding(), ", stride ", bind.stride(), ", rate ", bind.inputRate(), ", divisor ", bind.divisor()));
     }
-    
+
     // TODO log more pipeline state
   }
-  
+
 }

@@ -499,7 +499,7 @@ namespace dxvk {
     HRESULT STDMETHODCALLTYPE GetIndices(IDirect3DIndexBuffer9** ppIndexData);
 
     HRESULT STDMETHODCALLTYPE CreatePixelShader(
-      const DWORD*                  pFunction, 
+      const DWORD*                  pFunction,
             IDirect3DPixelShader9** ppShader);
 
     HRESULT STDMETHODCALLTYPE SetPixelShader(IDirect3DPixelShader9* pShader);
@@ -677,7 +677,7 @@ namespace dxvk {
 
     /**
      * \brief Locks a subresource of an image
-     * 
+     *
      * \param [in] Subresource The subresource of the image to lock
      * \param [out] pLockedBox The returned locked box of the image, containing data ptr and strides
      * \param [in] pBox The region of the subresource to lock. This offsets the returned data ptr
@@ -700,7 +700,7 @@ namespace dxvk {
 
     /**
      * \brief Unlocks a subresource of an image
-     * 
+     *
      * Passthrough to device unlock.
      * \param [in] Subresource The subresource of the image to unlock
      * \returns \c D3D_OK if the parameters are valid or D3DERR_INVALIDCALL if it fails.
@@ -791,7 +791,7 @@ namespace dxvk {
     inline bool IsAlphaToCoverageEnabled() {
       const bool alphaTest = m_state.renderStates[D3DRS_ALPHATESTENABLE] != 0;
 
-      return m_amdATOC || (m_nvATOC && alphaTest);
+      return (m_amdATOC || (m_nvATOC && alphaTest)) && m_flags.test(D3D9DeviceFlag::ValidSampleMask);
     }
 
     inline bool IsDepthBiasEnabled() {
@@ -816,7 +816,7 @@ namespace dxvk {
     }
 
     void BindMultiSampleState();
-    
+
     void BindBlendState();
 
     void BindBlendFactor();
@@ -837,12 +837,12 @@ namespace dxvk {
 
     template <DxsoProgramType ShaderStage, typename HardwareLayoutType, typename SoftwareLayoutType, typename ShaderType>
     inline void UploadConstantSet(const SoftwareLayoutType& Src, const D3D9ConstantLayout& Layout, const ShaderType& Shader);
-    
+
     template <DxsoProgramType ShaderStage>
     void UploadConstants();
-    
+
     void UpdateClipPlanes();
-    
+
     template <uint32_t Offset, uint32_t Length>
     void UpdatePushConstant(const void* pData);
 
@@ -865,7 +865,7 @@ namespace dxvk {
       D3DPRIMITIVETYPE PrimitiveType,
       UINT             PrimitiveCount,
       UINT             InstanceCount);
-    
+
     uint32_t GetInstanceCount() const;
 
     void PrepareDraw(D3DPRIMITIVETYPE PrimitiveType);
@@ -1162,6 +1162,23 @@ namespace dxvk {
 
     uint64_t GetCurrentSequenceNumber();
 
+    bool IsTextureBoundAsAttachment(const D3D9CommonTexture* pTexture) const {
+      if (unlikely(pTexture->IsRenderTarget())) {
+        for (uint32_t i : bit::BitMask(m_boundRTs)) {
+          auto texInfo = m_state.renderTargets[i]->GetCommonTexture();
+          if (unlikely(texInfo == pTexture)) {
+            return true;
+          }
+        }
+      } else if (unlikely(pTexture->IsDepthStencil() && m_state.depthStencil != nullptr)) {
+        auto texInfo = m_state.depthStencil->GetCommonTexture();
+        if (unlikely(texInfo == pTexture)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     Com<D3D9InterfaceEx>            m_parent;
     D3DDEVTYPE                      m_deviceType;
     HWND                            m_window;
@@ -1279,7 +1296,7 @@ namespace dxvk {
     D3D9ConstantLayout              m_vsLayout;
     D3D9ConstantLayout              m_psLayout;
     D3D9ConstantSets                m_consts[DxsoProgramTypes::Count];
-	
+
     D3D9UserDefinedAnnotation*      m_annotation = nullptr;
 
     D3D9ViewportInfo                m_viewportInfo;

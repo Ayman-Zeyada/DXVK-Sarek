@@ -98,7 +98,7 @@ namespace dxvk {
       }
       useRobustConstantAccess &= m_psLayout.totalSize() % m_robustUBOAlignment == 0;
     }
-    
+
     if (!useRobustConstantAccess) {
       m_vsFloatConstsCount = m_vsLayout.floatCount;
       m_vsIntConstsCount   = m_vsLayout.intCount;
@@ -526,7 +526,7 @@ namespace dxvk {
     desc.IsBackBuffer       = FALSE;
     desc.IsAttachmentOnly   = FALSE;
 
-    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, &desc)))
+    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, D3DRTYPE_TEXTURE, &desc)))
       return D3DERR_INVALIDCALL;
 
     try {
@@ -587,7 +587,7 @@ namespace dxvk {
     desc.IsBackBuffer       = FALSE;
     desc.IsAttachmentOnly   = FALSE;
 
-    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, &desc)))
+    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, D3DRTYPE_TEXTURE, &desc)))
       return D3DERR_INVALIDCALL;
 
     try {
@@ -635,7 +635,7 @@ namespace dxvk {
     desc.IsBackBuffer       = FALSE;
     desc.IsAttachmentOnly   = FALSE;
 
-    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, &desc)))
+    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, D3DRTYPE_TEXTURE, &desc)))
       return D3DERR_INVALIDCALL;
 
     try {
@@ -946,6 +946,9 @@ namespace dxvk {
     D3D9CommonTexture* srcTexInfo = GetCommonTexture(src);
 
     if (srcTexInfo->Desc()->Format != dstTexInfo->Desc()->Format)
+      return D3DERR_INVALIDCALL;
+
+    if (src->GetSurfaceExtent() != dst->GetSurfaceExtent())
       return D3DERR_INVALIDCALL;
 
     if (dstTexInfo->Desc()->Pool == D3DPOOL_DEFAULT)
@@ -1551,7 +1554,7 @@ namespace dxvk {
       const Rc<DxvkImageView>& imageView,
       VkImageAspectFlags       aspectMask,
       VkClearValue             clearValue) {
-      
+
       VkExtent3D imageExtent = imageView->mipLevelExtent(0);
       extent.width = std::min(imageExtent.width, extent.width);
       extent.height = std::min(imageExtent.height, extent.height);
@@ -1671,10 +1674,10 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::MultiplyTransform(D3DTRANSFORMSTATETYPE TransformState, const D3DMATRIX* pMatrix) {
     D3D9DeviceLock lock = LockDevice();
 
-    if (unlikely(ShouldRecord()))
-      return m_recorder->MultiplyStateTransform(TransformState, pMatrix);
+    const uint32_t idx = GetTransformIndex(TransformState);
 
-    uint32_t idx = GetTransformIndex(TransformState);
+    if (unlikely(ShouldRecord()))
+      return m_recorder->MultiplyStateTransform(idx, pMatrix);
 
     m_state.transforms[idx] = m_state.transforms[idx] * ConvertMatrix(pMatrix);
 
@@ -1690,13 +1693,23 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetViewport(const D3DVIEWPORT9* pViewport) {
     D3D9DeviceLock lock = LockDevice();
 
+    // Outright crashes on native, but let's be
+    // somewhat more elegant about it.
+    if (unlikely(pViewport == nullptr))
+      return D3DERR_INVALIDCALL;
+
     if (unlikely(ShouldRecord()))
       return m_recorder->SetViewport(pViewport);
 
     if (m_state.viewport == *pViewport)
       return D3D_OK;
 
-    m_state.viewport = *pViewport;
+    m_state.viewport.X = pViewport->X;
+    m_state.viewport.Y = pViewport->Y;
+    m_state.viewport.Width = pViewport->Width;
+    m_state.viewport.Height = pViewport->Height;
+    m_state.viewport.MinZ = pViewport->MinZ;
+    m_state.viewport.MaxZ = pViewport->MinZ < pViewport->MaxZ ? pViewport->MaxZ : pViewport->MinZ + 0.001f;
 
     m_flags.set(D3D9DeviceFlag::DirtyViewportScissor);
     m_flags.set(D3D9DeviceFlag::DirtyFFViewport);
@@ -1709,7 +1722,7 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetViewport(D3DVIEWPORT9* pViewport) {
     D3D9DeviceLock lock = LockDevice();
 
-    if (pViewport == nullptr)
+    if (unlikely(pViewport == nullptr))
       return D3DERR_INVALIDCALL;
 
     *pViewport = m_state.viewport;
@@ -2238,8 +2251,15 @@ namespace dxvk {
     if (unlikely(ppSB == nullptr))
       return D3DERR_INVALIDCALL;
 
+    D3D9StateBlockType stateBlockType = ConvertStateBlockType(Type);
+
+    if (unlikely(stateBlockType == D3D9StateBlockType::Unknown)) {
+      Logger::warn(str::format("D3D9DeviceEx::CreateStateBlock: Invalid state block type: ", Type));
+      return D3DERR_INVALIDCALL;
+    }
+
     try {
-      const Com<D3D9StateBlock> sb = new D3D9StateBlock(this, ConvertStateBlockType(Type));
+      const Com<D3D9StateBlock> sb = new D3D9StateBlock(this, stateBlockType);
       *ppSB = sb.ref();
       return D3D_OK;
     }
@@ -2327,13 +2347,8 @@ namespace dxvk {
     if (unlikely(pValue == nullptr))
       return D3DERR_INVALIDCALL;
 
-    *pValue = 0;
-
-    if (unlikely(Stage >= caps::TextureStageCount))
-      return D3DERR_INVALIDCALL;
-
-    if (unlikely(dxvkType >= TextureStageStateCount))
-      return D3DERR_INVALIDCALL;
+    Stage = std::min(Stage, DWORD(caps::TextureStageCount - 1));
+    dxvkType = std::min(dxvkType, D3D9TextureStageStateTypes(DXVK_TSS_COUNT - 1));
 
     *pValue = m_state.textureStages[Stage][dxvkType];
 
@@ -2499,15 +2514,16 @@ namespace dxvk {
     EmitCs([this,
       cPrimType    = PrimitiveType,
       cPrimCount   = PrimitiveCount,
-      cStartVertex = StartVertex,
-      cInstanceCount = GetInstanceCount()
+      cStartVertex = StartVertex
     ](DxvkContext* ctx) {
-      auto drawInfo = GenerateDrawInfo(cPrimType, cPrimCount, cInstanceCount);
+      uint32_t vertexCount = GetVertexCount(cPrimType, cPrimCount);
 
       ApplyPrimitiveType(ctx, cPrimType);
 
+      // Tests on Windows show that D3D9 does not do non-indexed instanced draws.
+
       ctx->draw(
-        drawInfo.vertexCount, drawInfo.instanceCount,
+        vertexCount, 1,
         cStartVertex, 0);
     });
 
@@ -2579,17 +2595,16 @@ namespace dxvk {
     EmitCs([this,
       cBufferSlice  = std::move(upSlice.slice),
       cPrimType     = PrimitiveType,
-      cPrimCount    = PrimitiveCount,
-      cInstanceCount = GetInstanceCount(),
-      cStride       = VertexStreamZeroStride
+      cStride       = VertexStreamZeroStride,
+      cVertexCount  = drawInfo.vertexCount
     ](DxvkContext* ctx) {
-      auto drawInfo = GenerateDrawInfo(cPrimType, cPrimCount, cInstanceCount);
-
       ApplyPrimitiveType(ctx, cPrimType);
+
+      // Tests on Windows show that D3D9 does not do non-indexed instanced draws.
 
       ctx->bindVertexBuffer(0, cBufferSlice, cStride);
       ctx->draw(
-        drawInfo.vertexCount, drawInfo.instanceCount,
+        cVertexCount, 1,
         0, 0);
       ctx->bindVertexBuffer(0, DxvkBufferSlice(), 0);
     });
@@ -2731,8 +2746,7 @@ namespace dxvk {
       cVertexCount   = VertexCount,
       cStartIndex    = SrcStartIndex,
       cInstanceCount = GetInstanceCount(),
-      cBufferSlice   = slice,
-      cIndexed       = m_state.indices != nullptr
+      cBufferSlice   = slice
     ](DxvkContext* ctx) {
       Rc<DxvkShader> shader = m_swvpEmulator.GetShaderModule(this, cDecl);
 
@@ -3703,7 +3717,7 @@ namespace dxvk {
     desc.IsBackBuffer       = FALSE;
     desc.IsAttachmentOnly   = TRUE;
 
-    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, &desc)))
+    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, D3DRTYPE_TEXTURE, &desc)))
       return D3DERR_INVALIDCALL;
 
     try {
@@ -3747,7 +3761,7 @@ namespace dxvk {
     desc.IsBackBuffer       = FALSE;
     desc.IsAttachmentOnly   = Pool == D3DPOOL_DEFAULT;
 
-    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, &desc)))
+    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, D3DRTYPE_TEXTURE, &desc)))
       return D3DERR_INVALIDCALL;
 
     if (pSharedHandle != nullptr && Pool != D3DPOOL_DEFAULT)
@@ -3796,7 +3810,7 @@ namespace dxvk {
     desc.IsBackBuffer       = FALSE;
     desc.IsAttachmentOnly   = TRUE;
 
-    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, &desc)))
+    if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, D3DRTYPE_TEXTURE, &desc)))
       return D3DERR_INVALIDCALL;
 
     try {
@@ -4032,13 +4046,13 @@ namespace dxvk {
           DWORD                      Stage,
           D3D9TextureStageStateTypes Type,
           DWORD                      Value) {
+
+    // Clamp values instead of checking and returning INVALID_CALL
+    // Matches tests + Dawn of Magic 2 relies on it.
+    Stage = std::min(Stage, DWORD(caps::TextureStageCount - 1));
+    Type = std::min(Type, D3D9TextureStageStateTypes(DXVK_TSS_COUNT - 1));
+
     D3D9DeviceLock lock = LockDevice();
-
-    if (unlikely(Stage >= caps::TextureStageCount))
-      return D3DERR_INVALIDCALL;
-
-    if (unlikely(Type >= TextureStageStateCount))
-      return D3DERR_INVALIDCALL;
 
     if (unlikely(ShouldRecord()))
       return m_recorder->SetStateTextureStageState(Stage, Type, Value);
@@ -4110,8 +4124,8 @@ namespace dxvk {
     DxvkDeviceFeatures enabled = {};
 
     // Geometry shaders are used for some meta ops
-    enabled.core.features.geometryShader = VK_TRUE;
-    enabled.core.features.robustBufferAccess = VK_TRUE;
+    enabled.core.features.geometryShader = supported.core.features.geometryShader;
+    enabled.core.features.robustBufferAccess = supported.core.features.robustBufferAccess;
     enabled.extRobustness2.robustBufferAccess2 = supported.extRobustness2.robustBufferAccess2;
 
     enabled.extMemoryPriority.memoryPriority = supported.extMemoryPriority.memoryPriority;
@@ -4128,15 +4142,15 @@ namespace dxvk {
     enabled.core.features.vertexPipelineStoresAndAtomics = supported.core.features.vertexPipelineStoresAndAtomics;
 
     // DXVK Meta
-    enabled.core.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-    enabled.core.features.imageCubeArray = VK_TRUE;
+    enabled.core.features.shaderStorageImageWriteWithoutFormat = supported.core.features.shaderStorageImageWriteWithoutFormat;
+    enabled.core.features.imageCubeArray = supported.core.features.imageCubeArray;
 
     // SM1 level hardware
     enabled.core.features.depthClamp = supported.core.features.depthClamp;
     enabled.core.features.depthBiasClamp = supported.core.features.depthBiasClamp;
     enabled.core.features.fillModeNonSolid = supported.core.features.fillModeNonSolid;
     enabled.core.features.pipelineStatisticsQuery = supported.core.features.pipelineStatisticsQuery;
-    enabled.core.features.sampleRateShading = VK_TRUE;
+    enabled.core.features.sampleRateShading = supported.core.features.sampleRateShading;
     enabled.core.features.samplerAnisotropy = supported.core.features.samplerAnisotropy;
     enabled.core.features.shaderClipDistance = supported.core.features.shaderClipDistance;
     enabled.core.features.shaderCullDistance = supported.core.features.shaderCullDistance;
@@ -4145,24 +4159,24 @@ namespace dxvk {
     enabled.core.features.textureCompressionBC = supported.core.features.textureCompressionBC;
 
     enabled.extDepthClipEnable.depthClipEnable = supported.extDepthClipEnable.depthClipEnable;
-    enabled.extHostQueryReset.hostQueryReset = VK_TRUE;
+    enabled.extHostQueryReset.hostQueryReset = supported.extHostQueryReset.hostQueryReset;
 
     // SM2 level hardware
-    enabled.core.features.occlusionQueryPrecise = VK_TRUE;
+    enabled.core.features.occlusionQueryPrecise = supported.core.features.occlusionQueryPrecise;
 
     // SM3 level hardware
     enabled.core.features.multiViewport = supported.core.features.multiViewport;
-    enabled.core.features.independentBlend = VK_TRUE;
+    enabled.core.features.independentBlend = supported.core.features.independentBlend;
 
     // D3D10 level hardware supports this in D3D9 native.
-    enabled.core.features.fullDrawIndexUint32 = VK_TRUE;
+    enabled.core.features.fullDrawIndexUint32 = supported.core.features.fullDrawIndexUint32;
 
     // Enable depth bounds test if we support it.
     enabled.core.features.depthBounds = supported.core.features.depthBounds;
 
     if (supported.extCustomBorderColor.customBorderColorWithoutFormat) {
-      enabled.extCustomBorderColor.customBorderColors             = VK_TRUE;
-      enabled.extCustomBorderColor.customBorderColorWithoutFormat = VK_TRUE;
+      enabled.extCustomBorderColor.customBorderColors             = supported.extCustomBorderColor.customBorderColors;
+      enabled.extCustomBorderColor.customBorderColorWithoutFormat = supported.extCustomBorderColor.customBorderColorWithoutFormat;
     }
 
     enabled.extNonSeamlessCubeMap.nonSeamlessCubeMap = supported.extNonSeamlessCubeMap.nonSeamlessCubeMap;
@@ -4249,8 +4263,8 @@ namespace dxvk {
         info.stages = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
       } else {
         info.usage  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
-        info.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        info.access = VK_ACCESS_TRANSFER_READ_BIT;
+        info.stages = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        info.access = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
       }
 
       D3D9BufferSlice result;
@@ -5056,7 +5070,7 @@ namespace dxvk {
 
     // Round to nearest
     _controlfp(_RC_NEAR, _MCW_RC);
-#elif (defined(__GNUC__) || defined(__MINGW32__)) && (defined(__i386__) || defined(__x86_64__) || defined(__ia64))
+#elif (defined(__GNUC__) || defined(__MINGW32__)) && (defined(__i386__) || (defined(__x86_64__) && !defined(__arm64ec__)) || defined(__ia64))
     // For GCC/MinGW we can use inline asm to set it.
     // This only works for x86 and x64 processors however.
 
@@ -5208,7 +5222,7 @@ namespace dxvk {
     uint32_t floatCount = m_vsFloatConstsCount;
     if (constSet.meta.needsConstantCopies) {
       auto shader = GetCommonShader(m_state.vertexShader);
-      floatCount = std::max(floatCount, shader->GetMaxDefinedConstant());
+      floatCount = std::max(floatCount, shader->GetMaxDefinedConstant() + 1);
     }
     floatCount = std::min(floatCount, constSet.meta.maxConstIndexF);
 
@@ -5289,7 +5303,7 @@ namespace dxvk {
     uint32_t floatCount = ShaderStage == DxsoProgramType::VertexShader ? m_vsFloatConstsCount : m_psFloatConstsCount;
     if (constSet.meta.needsConstantCopies) {
       auto shader = GetCommonShader(Shader);
-      floatCount = std::max(floatCount, shader->GetMaxDefinedConstant());
+      floatCount = std::max(floatCount, shader->GetMaxDefinedConstant() + 1);
     }
     floatCount = std::min(constSet.meta.maxConstIndexF, floatCount);
 
@@ -5476,7 +5490,7 @@ namespace dxvk {
 
   inline void D3D9DeviceEx::UpdateBoundRTs(uint32_t index) {
     const uint32_t bit = 1 << index;
-    
+
     m_boundRTs &= ~bit;
 
     if (m_state.renderTargets[index] != nullptr &&
@@ -5617,9 +5631,11 @@ namespace dxvk {
       // Guaranteed to not be nullptr...
       auto texInfo = GetCommonTexture(m_state.textures[texIdx]);
 
-      if (texInfo->NeedsMipGen()) {
+      if (likely(texInfo->NeedsMipGen())) {
         this->EmitGenerateMips(texInfo);
-        texInfo->SetNeedsMipGen(false);
+        if (likely(!IsTextureBoundAsAttachment(texInfo))) {
+          texInfo->SetNeedsMipGen(false);
+        }
       }
     }
 
@@ -5645,14 +5661,18 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::MarkTextureMipsUnDirty(D3D9CommonTexture* pResource) {
-    pResource->SetNeedsMipGen(false);
+    if (likely(!IsTextureBoundAsAttachment(pResource))) {
+      // We need to keep the texture marked as needing mipmap generation because we don't set that when rendering.
+      pResource->SetNeedsMipGen(false);
 
-    for (uint32_t i : bit::BitMask(m_activeTextures)) {
-      // Guaranteed to not be nullptr...
-      auto texInfo = GetCommonTexture(m_state.textures[i]);
+      for (uint32_t i : bit::BitMask(m_activeTextures)) {
+        // Guaranteed to not be nullptr...
+        auto texInfo = GetCommonTexture(m_state.textures[i]);
 
-      if (texInfo == pResource)
-        m_activeTexturesToGen &= ~(1 << i);
+        if (unlikely(texInfo == pResource)) {
+          m_activeTexturesToGen &= ~(1 << i);
+        }
+      }
     }
   }
 
@@ -5855,12 +5875,23 @@ namespace dxvk {
     // Originally we did this only for powers of two
     // resolutions but since NEAREST filtering fixed to
     // truncate, we need to do this all the time now.
-    float cf = 0.5f - (1.0f / 128.0f);
+    constexpr float cf = 0.5f - (1.0f / 128.0f);
+
+    // How much to bias MinZ by to avoid a depth
+    // degenerate viewport.
+    // Tests show that the bias is only applied below minZ values of 0.5
+    float zBias;
+    if (vp.MinZ >= 0.5f) {
+      zBias = 0.0f;
+    } else {
+      zBias = 0.001f;
+    }
 
     viewport = VkViewport{
       float(vp.X)     + cf,    float(vp.Height + vp.Y) + cf,
       float(vp.Width),        -float(vp.Height),
-      vp.MinZ,                 vp.MaxZ,
+      std::clamp(vp.MinZ,                            0.0f, 1.0f),
+      std::clamp(std::max(vp.MaxZ, vp.MinZ + zBias), 0.0f, 1.0f),
     };
 
     // Scissor rectangles. Vulkan does not provide an easy way
@@ -6273,7 +6304,7 @@ namespace dxvk {
 
     if (inactiveMask)
       UnbindTextures(inactiveMask);
-  
+
     m_dirtyTextures &= ~usedMask;
   }
 
@@ -7588,7 +7619,7 @@ namespace dxvk {
       desc.IsBackBuffer       = FALSE;
       desc.IsAttachmentOnly   = TRUE;
 
-      if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, &desc)))
+      if (FAILED(D3D9CommonTexture::NormalizeTextureProperties(this, D3DRTYPE_TEXTURE, &desc)))
         return D3DERR_NOTAVAILABLE;
 
       m_autoDepthStencil = new D3D9Surface(this, &desc, nullptr, nullptr);

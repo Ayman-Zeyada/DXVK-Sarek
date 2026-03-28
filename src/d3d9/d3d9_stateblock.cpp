@@ -39,6 +39,8 @@ namespace dxvk {
 
 
   HRESULT STDMETHODCALLTYPE D3D9StateBlock::Capture() {
+    D3D9DeviceLock lock = m_parent->LockDevice();
+
     if (m_captures.flags.test(D3D9CapturedStateFlag::VertexDecl))
       SetVertexDeclaration(m_deviceState->vertexDecl.ptr());
 
@@ -49,6 +51,8 @@ namespace dxvk {
 
 
   HRESULT STDMETHODCALLTYPE D3D9StateBlock::Apply() {
+    D3D9DeviceLock lock = m_parent->LockDevice();
+
     m_applying = true;
 
     if (m_captures.flags.test(D3D9CapturedStateFlag::VertexDecl) && m_state.vertexDecl != nullptr)
@@ -170,6 +174,9 @@ namespace dxvk {
           DWORD                      Stage,
           D3D9TextureStageStateTypes Type,
           DWORD                      Value) {
+    Stage = std::min(Stage, DWORD(caps::TextureStageCount - 1));
+    Type = std::min(Type, D3D9TextureStageStateTypes(DXVK_TSS_COUNT - 1));
+
     m_state.textureStages[Stage][Type] = Value;
 
     m_captures.flags.set(D3D9CapturedStateFlag::TextureStages);
