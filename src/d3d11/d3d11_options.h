@@ -102,6 +102,11 @@ namespace dxvk {
     /// Some games are broken and ignore row pitch.
     bool disableDirectImageMapping = false;
 
+    /// Create process-local textures when applications request shared
+    /// resources but external memory is unavailable. This does not
+    /// support sharing resources with another device or process.
+    bool forceLocalSharedResources = false;
+
     /// Shader dump path
     std::string shaderDumpPath;
   };

@@ -51,6 +51,13 @@ namespace dxvk {
 
     const auto sharingFlags = D3D11_RESOURCE_MISC_SHARED|D3D11_RESOURCE_MISC_SHARED_NTHANDLE|D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
 
+    if ((m_desc.MiscFlags & sharingFlags)
+     && pDevice->GetOptions()->forceLocalSharedResources
+     && !pDevice->GetDXVKDevice()->features().khrExternalMemoryWin32) {
+      Logger::warn("D3D11: Replacing an unsupported shared texture with a process-local texture");
+      m_desc.MiscFlags &= ~sharingFlags;
+    }
+
     if (m_desc.MiscFlags & sharingFlags) {
       if (pDevice->GetFeatureLevel() < D3D_FEATURE_LEVEL_10_0 ||
           (m_desc.MiscFlags & (D3D11_RESOURCE_MISC_SHARED|D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)) == (D3D11_RESOURCE_MISC_SHARED|D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) ||
