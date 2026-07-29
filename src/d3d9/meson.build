@@ -13,6 +13,23 @@ d3d9_shaders = files([
   'shaders/d3d9_fixed_function_frag_sample.frag',
 ])
 
+d3d9_fixed_function_vert_noclip = custom_target(
+  'd3d9_fixed_function_vert_noclip',
+  input   : 'shaders/d3d9_fixed_function_vert.vert',
+  output  : 'd3d9_fixed_function_vert_noclip.h',
+  depfile : 'd3d9_fixed_function_vert_noclip.h.d',
+  command : [
+    glsl_compiler,
+    '--quiet',
+    '--target-env', 'vulkan1.3',
+    '--vn', 'd3d9_fixed_function_vert_noclip',
+    '--depfile', '@DEPFILE@',
+    '-DDXVK_NO_CLIP_DISTANCE=1',
+    '@INPUT@',
+    '-o', '@OUTPUT@',
+  ],
+)
+
 d3d9_src = [
   'd3d9_main.cpp',
   'd3d9_interface.cpp',
@@ -61,7 +78,8 @@ if platform != 'windows'
   d3d9_link_depends += files('d3d9.sym')
 endif
 
-d3d9_dll = shared_library(dxvk_name_prefix+'d3d9', d3d9_src, glsl_generator.process(d3d9_shaders), d3d9_res,
+d3d9_dll = shared_library(dxvk_name_prefix+'d3d9', d3d9_src,
+  glsl_generator.process(d3d9_shaders), d3d9_fixed_function_vert_noclip, d3d9_res,
   dependencies        : [ dxbc_spirv_dep, dxvk_dep ],
   include_directories : dxvk_include_path,
   install             : true,

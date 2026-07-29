@@ -59,7 +59,7 @@ namespace dxvk {
     Rc<DxvkShader> m_vs;
     Rc<DxvkShader> m_fs;
 
-    static Rc<DxvkShader> buildVs();
+    static Rc<DxvkShader> buildVs(D3D9DeviceEx* pDevice);
     static Rc<DxvkShader> buildFs(D3D9DeviceEx* pDevice);
 
     constexpr static uint32_t GetPushSamplerOffset(uint32_t samplerIndex) {

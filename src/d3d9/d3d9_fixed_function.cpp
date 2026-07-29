@@ -13,17 +13,18 @@
 #include <cfloat>
 
 #include <d3d9_fixed_function_vert.h>
+#include <d3d9_fixed_function_vert_noclip.h>
 #include <d3d9_fixed_function_frag.h>
 #include <d3d9_fixed_function_frag_sample.h>
 
 namespace dxvk {
 
   D3D9FFShaderModuleSet::D3D9FFShaderModuleSet(D3D9DeviceEx* pDevice)
-    : m_vs(buildVs())
+    : m_vs(buildVs(pDevice))
     , m_fs(buildFs(pDevice)) {}
 
 
-  Rc<DxvkShader> D3D9FFShaderModuleSet::buildVs() {
+  Rc<DxvkShader> D3D9FFShaderModuleSet::buildVs(D3D9DeviceEx* pDevice) {
     small_vector<DxvkBindingInfo, 3> bindings = {};
 
     auto& fixedFunctionDataBinding = bindings.emplace_back();
@@ -61,7 +62,9 @@ namespace dxvk {
     info.specDataBuffer = DxvkShaderBinding(VK_SHADER_STAGE_VERTEX_BIT, SpecDataSet, 0u);
     info.debugName = "FF VS";
 
-    return new DxvkSpirvShader(info, d3d9_fixed_function_vert);
+    return pDevice->GetDXVKDevice()->features().core.features.shaderClipDistance
+      ? new DxvkSpirvShader(info, d3d9_fixed_function_vert)
+      : new DxvkSpirvShader(info, d3d9_fixed_function_vert_noclip);
   }
 
 
